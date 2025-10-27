@@ -1,5 +1,5 @@
 model:
-  api_use: false
+  api_use: true
   pre_func_use: true
   related_attrs: true
   distri_analysis: true
@@ -11,23 +11,23 @@ model:
   run_info: '0Following results running with rereading (after running, if result not idea, suggest rereading, as file reading problem)'
 
 read:
-  pre_func: true
-  distri_analysis: true
-  related_attrs: true
-  cluster: true
-  guide: true
-  error_checking: true
-  func: true
-  err_gen: true
-  read_in_batch: true
+  pre_func: false
+  distri_analysis: false
+  related_attrs: false
+  cluster: false
+  guide: false
+  error_checking: false
+  func: false
+  err_gen: false
+  read_in_batch: false
   start_time: '02-14-19:32'  
   end_time: '02-14-22:23'  
 
 data:
   base_dir: '.'
   err_rate_list: ["mixed_err", "typos", "missing_values", "pattern_violations", "rule_violations", "outliers"]
-  all_set_num: 5
-  datasets: ['beers']
+  all_set_num: 1
+  datasets: ['hospital']
   err_check_val_num_per_query: 20
   result_dir: 'pipeline'
   

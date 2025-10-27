@@ -119,10 +119,10 @@ def get_ans_from_llm(prompt, api_use=False):
             except Exception as e:
                 print(e)
     elif api_use:
-        model_type='qwen2.5-7b-instruct'
+        model_type='gpt-4o-mini'
         role_descr="You are a world-class data engineer, proficient in cleaning dirty data."
         api_key_list = [
-            ''
+            'sk-9SSJQSfSLf7aUtfTCMhCgsxiw5deylXvOUuHtPCDDB3Sa1ds'
         ]
         # Exponential backoff parameters
         base_sleep = 0.2
@@ -134,7 +134,7 @@ def get_ans_from_llm(prompt, api_use=False):
             try:
                 client = OpenAI(
                     api_key=api_key_list[key_idx],
-                    base_url='https://api.openai.com/v1'
+                    base_url='https://jeniya.cn/v1'
                 )
                 completion_res = client.chat.completions.create(
                     model=model_type,
