@@ -174,7 +174,7 @@ def rag_query(query, documents, GPT_USE=True):
 
 def query_base(query, GPT_USE=True):
     if GPT_USE:
-        response = get_ans_from_llm(f"{query}")
+        response = get_ans_from_llm(f"{query}", api_use=True)
     else:
         response = ''
     return response
@@ -202,12 +202,24 @@ def copy_read_files_in_dir(dst_dir, src_dir):
         for file in os.listdir(src_dir):
             src_file = os.path.join(src_dir, file)
             dst_file = os.path.join(dst_dir, file)
+            
+            # 检查源文件和目标文件是否是同一个文件
+            if os.path.abspath(src_file) == os.path.abspath(dst_file):
+                # 如果是同一个文件，则跳过复制
+                continue
+                
             shutil.copy2(src_file, dst_file)
                 
 
 def copy_file(read_path, resp_path, file_name):
     src_file = os.path.join(read_path, file_name)
     dst_file = os.path.join(resp_path, file_name)
+    
+    # 检查源文件和目标文件是否是同一个文件
+    if os.path.abspath(src_file) == os.path.abspath(dst_file):
+        # 如果是同一个文件，则不需要复制，直接返回
+        return
+    
     shutil.copy2(src_file, dst_file)
 
 
