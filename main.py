@@ -24,7 +24,9 @@ from feature import cluster
 from get_rel_attrs import (cal_all_column_nmi, cal_strong_res_column_nmi)
 from measure import measure_detect
 from prompt_gen import (create_err_gen_inst_prompt, err_clean_func_prompt,
-                        error_check_prompt, guide_gen_prompt, pre_func_prompt)
+                        error_check_prompt, pre_func_prompt
+                        #guide_gen_prompt, 
+                        )
 from utility import (Logger, Timer, copy_file, copy_read_files_in_dir,
                      default_dict_of_lists, get_ans_from_llm, query_base,
                      rag_query, split_list_to_sublists, get_read_paths)
@@ -64,7 +66,7 @@ def extract_func(text_content):
                 clean_func_list.append(function)
             elif 'is_dirty' in function_name:
                 dirty_func_list.append(function)
-    return clean_func_list, dirty_func_listA图人才 
+    return clean_func_list, dirty_func_list
 
 
 def extract_err_info(text, attr):
@@ -102,6 +104,7 @@ def gen_dirty_funcs(attr, clean_info, errs_info):
         dirty_str = dirty_str + str(errs_info)
         dirty_str = dirty_str + "\n"
     func_gen_prompt = err_clean_func_prompt(attr, clean_info, dirty_str)
+    llm_gen_func = get_ans_from_llm(func_gen_prompt, api_use=API_USE)
     temp_clean_flist, dirty_flist = extract_func(llm_gen_func)
     return temp_clean_flist, dirty_flist, func_gen_prompt, llm_gen_func
 
@@ -278,10 +281,14 @@ def task_det_initial(attr_name, error_checking_res_directory):
     df_center_idx = ["{" + ",".join(f'"{col}":"{dirty_csv.loc[idx, col]}"' for col in [attr_name] + related_attrs) + "}" for idx in center_idx]
     split_center_values = split_list_to_sublists(df_center_idx, err_check_val_num_per_query)
     error_response = ''
-    with ThreadPoolExecutor(max_workers=2*os.cpu_count()) as a_executor:
-        a_results = [a_executor.submit(subtask_det_initial, sub_list_values, attr_name) for sub_list_values in split_center_values]
-        for a_future in as_completed(a_results):
-            error_response += a_future.result() + '\n'
+    # 改为单线程处理，便于调试
+    for sub_list_values in split_center_values:
+        try:
+            error_response += subtask_det_initial(sub_list_values, attr_name) + '\n'
+        except Exception as e:
+            print(f"处理属性 {attr_name} 的子任务时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
     error_checking_file.write(error_response)
     error_checking_file.close()
 
@@ -376,16 +383,12 @@ def make_predictions(col, attr, dirty_csv, model_col, related_attrs_dict, funcs_
     related_attrs = list(related_attrs_dict[attr])
     columns = list(dirty_csv.columns)
     
-    with ThreadPoolExecutor(max_workers=256) as executor:
-        futures = []
-        for idx in range(len(dirty_csv)):
-            cell_val = dirty_csv.loc[idx, [attr]+related_attrs].to_dict()
-            future = executor.submit(single_val_feat, 
-                cell_val, None, funcs_for_attr, attr, idx, columns, feature_all_dict, resp_path)
-            futures.append(future)
-        results = []
-        for future in as_completed(futures):
-            results.append(future.result())
+    # 改为单线程处理
+    results = []
+    for idx in range(len(dirty_csv)):
+        cell_val = dirty_csv.loc[idx, [attr]+related_attrs].to_dict()
+        result = single_val_feat(cell_val, None, funcs_for_attr, attr, idx, columns, feature_all_dict, resp_path)
+        results.append(result)
             
     sorted_results = sorted([(r[0], r[1]) for r in results])
     test_feat_list = [feat for idx, feat in sorted_results]
@@ -459,13 +462,17 @@ def process_cluster(n_method, CLUSTER_READ, dataset, read_path, resp_path, dirty
     center_value_dict = {}  
     feature_all_dict = defaultdict(default_dict_of_lists)
     if not CLUSTER_READ:
-        with multiprocessing.Pool(len(all_attrs)) as pool:
-            results = [pool.apply_async(cluster, args=(dataset, 'RANDOM', n_method, col, related_attrs_dict, pre_funcs_for_attr, resp_path)) for col in range(len(all_attrs))]
-            for result in results:
-                col, center_list, cluster_list, val_feat_dict, feature_dict_attr = result.get()
+        for col in range(len(all_attrs)):
+            try:
+                col_result, center_list, cluster_list, val_feat_dict, feature_dict_attr = cluster(dataset, 'RANDOM', n_method, col, related_attrs_dict, pre_funcs_for_attr, resp_path)
                 cluster_list.insert(0, center_list)
                 cluster_index_dict[all_attrs[col]] = cluster_list
                 feature_all_dict.update(feature_dict_attr)
+            except Exception as e:
+                print(f"列 {col} ({all_attrs[col]}) 处理出错: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                raise  # 重新抛出异常，停止程序
         for key, value in cluster_index_dict.items():
             temp_list = []
             related_attrs = list(related_attrs_dict[key])
@@ -561,9 +568,14 @@ def process_error_checking(ERROR_CHECKING_READ, read_error_checking_path, all_at
         copy_read_files_in_dir(error_checking_res_directory, read_error_checking_path)
 
     else:
-        with ThreadPoolExecutor(max_workers=2*os.cpu_count()) as executor:
-            results = [executor.submit(task_det_initial, attr, error_checking_res_directory) for attr in all_attrs]
-            outputs = [result.result() for result in as_completed(results)]
+        # 改为单线程处理，便于调试
+        for attr in all_attrs:
+            try:
+                task_det_initial(attr, error_checking_res_directory)
+            except Exception as e:
+                print(f"处理属性 {attr} 时出错: {str(e)}")
+                import traceback
+                traceback.print_exc()
 
 
 def measure_llm_label(resp_path, clean_csv, all_attrs, related_attrs_dict, gt_wrong_dict, center_index_value_label_dict):
@@ -766,11 +778,12 @@ def load_config(config_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='config.yaml', help='Path to config file')
+    parser.add_argument('--config', type=str, default='run_config.yaml', help='Path to config file')
     args = parser.parse_args()
     config = load_config(args.config)
     
     # Model settings
+    FUNC_VAL_THRESHOLD = config['model']['func_val_threshold']
     n_method = config['model']['n_method']
     API_USE = config['model']['api_use']
     RELATED_ATTRS = config['model']['related_attrs']
@@ -1000,19 +1013,13 @@ if __name__ == "__main__":
             num_epochs = 5000
             logger.info('Start Training Local Models')
             time_start = time.time()
-            mp.set_start_method('spawn', force=True)
+            # 改为单线程处理
             feat_dict_train = {}
             label_dict_train = {}
-            feat_pool = mp.Pool()
-            results = []
             for attr in all_attrs:
-                result = feat_pool.apply_async(process_attr_train_feat, args=(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, err_gen_dict, funcs_for_attr, feature_all_dict, resp_path))
-                results.append(result)
-            for result in results:
-                attr, feature_list, label_list = result.get()
+                attr, feature_list, label_list = process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, err_gen_dict, funcs_for_attr, feature_all_dict, resp_path)
                 feat_dict_train[attr] = feature_list
                 label_dict_train[attr] = label_list
-            feat_pool.close()
             
             model_col = {}
             
