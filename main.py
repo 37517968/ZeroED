@@ -24,7 +24,8 @@ from feature import cluster
 from get_rel_attrs import (cal_all_column_nmi, cal_strong_res_column_nmi)
 from measure import measure_detect
 from prompt_gen import (create_err_gen_inst_prompt, err_clean_func_prompt,
-                        error_check_prompt, pre_func_prompt
+                        error_check_prompt, pre_func_prompt,
+                        create_clean_gen_inst_prompt, create_dirty_gen_inst_prompt,
                         #guide_gen_prompt, 
                         )
 from utility import (Logger, Timer, copy_file, copy_read_files_in_dir,
@@ -143,6 +144,39 @@ def process_gen_err_data(ERR_GEN_USE, ERR_GEN_READ, read_err_gen_path, err_gen_d
             results = [executor.submit(task_gen_err_data, attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, err_gen_dict) for attr in all_attrs]
             outputs = [result.result() for result in results]
 
+def process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ, read_enhanced_path, enhanced_data_directory, dirty_csv, all_attrs, related_attrs_dict, center_index_value_label_dict, enhanced_gen_dict, logger):
+    if ENHANCED_USE and ENHANCED_READ:
+        copy_read_files_in_dir(enhanced_data_directory, read_enhanced_path)
+        for attr in all_attrs:
+            if os.path.exists(os.path.join(enhanced_data_directory, f'clean_gen_res_{attr}.txt')):
+                with open(os.path.join(enhanced_data_directory, f'clean_gen_res_{attr}.txt'), 'r', encoding='utf-8') as file:
+                    for line in file:
+                        try:
+                            clean_dict = json.loads(line.strip())
+                            enhanced_gen_dict[attr]['clean'].append(clean_dict)
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Error parsing JSON for attribute {attr}: {e}")
+                            continue
+                        except Exception as e:
+                            logger.error(f"Unexpected error for attribute {attr}: {e}")
+                            continue
+            if os.path.exists(os.path.join(enhanced_data_directory, f'dirty_gen_res_{attr}.txt')):
+                with open(os.path.join(enhanced_data_directory, f'dirty_gen_res_{attr}.txt'), 'r', encoding='utf-8') as file:
+                    for line in file:
+                        try:
+                            err_dict = json.loads(line.strip())
+                            enhanced_gen_dict[attr]['dirty'].append(err_dict)
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Error parsing JSON for attribute {attr}: {e}")
+                            continue
+                        except Exception as e:
+                            logger.error(f"Unexpected error for attribute {attr}: {e}")
+                            continue
+
+    elif ENHANCED_USE and not ENHANCED_READ:
+        # 改为单线程处理，便于调试
+        for attr in all_attrs:
+            task_gen_enhanced_data(attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, enhanced_gen_dict, num_gen=50)
 
 def task_gen_err_data(attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, err_gen_dict):
     related_attrs = list(related_attrs_dict[attr]) 
@@ -190,6 +224,115 @@ def task_gen_err_data(attr, dirty_csv, center_index_value_label_dict, related_at
         err_gen_res_file.write('\n')
     err_gen_res_file.close()
 
+def task_gen_enhanced_data(attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, enhanced_gen_dict, num_gen):
+    related_attrs = list(related_attrs_dict[attr])
+    clean_gen_prompt_file = open(os.path.join(enhanced_gen_directory, f"prompt_ans_clean_gen_{attr}.txt"), 'w', encoding='utf-8')
+    dirty_gen_prompt_file = open(os.path.join(enhanced_gen_directory, f"prompt_ans_dirty_gen_{attr}.txt"), 'w', encoding='utf-8')
+    clean_gen_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_{attr}.txt"), 'w', encoding='utf-8')
+    dirty_gen_file = open(os.path.join(enhanced_gen_directory, f"dirty_gen_{attr}.txt"), 'w', encoding='utf-8')
+    wrong_values = []
+    right_values = []
+    used_idx_list = {}
+    for idx, _, label in center_index_value_label_dict[attr]:
+        if label == 1:
+            wrong_values.append(dirty_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
+            used_idx_list[idx] = 1
+        elif label == 0:
+            right_values.append(dirty_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
+            used_idx_list[idx] = 1
+    max_vals = 20
+    if len(wrong_values) > max_vals:
+        wrong_values_tmp = wrong_values[:max_vals]
+    else:
+        wrong_values_tmp = wrong_values
+    if len(right_values) > max_vals:
+        right_values_tmp = right_values[:max_vals]
+    else:
+        right_values_tmp = right_values
+    
+    # 处理干净数据生成
+    clean_gen_ans = ""
+    if num_gen > 20:
+        # 分批生成，每批20个
+        num_batches = (num_gen + 19) // 20  # 向上取整
+        for batch in range(num_batches):
+            batch_size = min(20, num_gen - batch * 20)
+            clean_gen_prompt = create_clean_gen_inst_prompt(right_values_tmp, attr, num_gen=batch_size)
+            batch_clean_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE)
+            clean_gen_ans += batch_clean_ans + "\n\n"
+            clean_gen_prompt_file.write('*'*20 + f' batch {batch+1} prompt ' + '*'*20 + '\n' + clean_gen_prompt + '\n' + '*'*20 + f' batch {batch+1} answer ' + '*'*20 + '\n' + batch_clean_ans + '\n\n\n\n\n\n')
+    else:
+        # 一次性生成
+        clean_gen_prompt = create_clean_gen_inst_prompt(right_values_tmp, attr, num_gen=num_gen)
+        clean_gen_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE)
+        clean_gen_prompt_file.write('*'*20 + ' prompt ' + '*'*20 + '\n' + clean_gen_prompt + '\n' + '*'*20 + ' answer ' + '*'*20 + '\n' + clean_gen_ans + '\n\n\n\n\n\n')
+    clean_gen_prompt_file.close()
+    clean_gen_file.write(clean_gen_ans)
+    clean_gen_file.close()
+    clean_info = extract_err_info(clean_gen_ans, attr)
+
+    # 处理干净数据，获取filtered_clean
+    filtered_clean = []
+    filtered_clean.extend(right_values)
+    for clean in clean_info:
+        try:
+            if clean[0] in all_attrs and str(clean[-1]).strip() not in right_values and str(
+                    clean[-1]).strip() not in wrong_values:
+                enhanced_gen_dict[attr]['clean'].append(clean[3])
+                filtered_clean.append(clean[3])
+        except IndexError as e:
+            logger.error(f"\nError: {e}\n Handling Value: {clean}\n Processing attribute: {attr}\n")
+    
+    # 处理脏数据生成（修改为对filtered_clean中的数据注入错误）
+    dirty_gen_ans = ""
+    num_dirty_to_generate = len(filtered_clean)  # 使用filtered_clean的长度作为需要生成的脏数据数量
+    
+    # 对filtered_clean分批，每批20个，注入错误
+    if num_dirty_to_generate > 20:
+        # 分批生成，每批20个
+        num_batches = (num_dirty_to_generate + 19) // 20  # 向上取整
+        for batch in range(num_batches):
+            start_idx = batch * 20
+            end_idx = min((batch + 1) * 20, num_dirty_to_generate)
+            clean_for_error_injection = filtered_clean[start_idx:end_idx]
+            
+            dirty_gen_prompt = create_dirty_gen_inst_prompt(clean_for_error_injection, wrong_values_tmp, attr, num_errors=len(clean_for_error_injection))
+            batch_dirty_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE)
+            dirty_gen_ans += batch_dirty_ans + "\n\n"
+            dirty_gen_prompt_file.write('*'*20 + f' batch {batch+1} prompt ' + '*'*20 + '\n' + dirty_gen_prompt + '\n' + '*'*20 + f' batch {batch+1} answer ' + '*'*20 + '\n' + batch_dirty_ans + '\n\n\n\n\n\n')
+    else:
+        # 一次性生成
+        dirty_gen_prompt = create_dirty_gen_inst_prompt(filtered_clean, wrong_values_tmp, attr, num_errors=num_dirty_to_generate)
+        dirty_gen_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE)
+        dirty_gen_prompt_file.write('*'*20 + ' prompt ' + '*'*20 + '\n' + dirty_gen_prompt + '\n' + '*'*20 + ' answer ' + '*'*20 + '\n' + dirty_gen_ans + '\n\n\n\n\n\n')
+    
+    dirty_gen_prompt_file.close()
+    dirty_gen_file.write(dirty_gen_ans)
+    dirty_gen_file.close()
+    dirty_info = extract_err_info(dirty_gen_ans, attr)
+    filtered_dirty = []
+    filtered_dirty.extend(wrong_values)
+    for dirty in dirty_info:
+        try:
+            if dirty[0] in all_attrs and str(dirty[-1]).strip() not in right_values and str(
+                    dirty[-1]).strip() not in wrong_values:
+                enhanced_gen_dict[attr]['dirty'].append(dirty[3])
+                # 将字典格式的数据添加到filtered_dirty中，保持数据类型一致
+                filtered_dirty.append(dirty[3])
+        except IndexError as e:
+            logger.error(f"\nError: {e}\n Handling Value: {dirty}\n Processing attribute: {attr}\n")
+    
+    clean_gen_res_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_res_{attr}.txt"), 'w', encoding='utf-8')
+    for clean_dict in enhanced_gen_dict[attr]['clean']:
+        json.dump(clean_dict, clean_gen_res_file)
+        clean_gen_res_file.write('\n')
+    clean_gen_res_file.close()
+    
+    dirty_gen_res_file = open(os.path.join(enhanced_gen_directory, f"dirty_gen_res_{attr}.txt"), 'w', encoding='utf-8')
+    for dirty_dict in enhanced_gen_dict[attr]['dirty']:
+        json.dump(dirty_dict, dirty_gen_res_file)
+        dirty_gen_res_file.write('\n')
+    dirty_gen_res_file.close()
 
 def gen_err_funcs(attr, err_gen_dict):  
     related_attrs = list(related_attrs_dict[attr])  
@@ -300,13 +443,13 @@ def normalize_string(s):
                .replace(", ", ",")
                .replace(": ", ":")
                .replace("'", '"'))
-    
-    
-def process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, err_gen_dict, funcs_for_attr, feature_all_dict, resp_path):
+
+
+def process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, err_gen_dict, enhanced_gen_dict, funcs_for_attr, feature_all_dict, resp_path):
     fasttext_model = fasttext.load_model('./cc.en.300.bin')
-    fasttext_dimension = len(dirty_csv.columns) 
-    fasttext.util.reduce_model(fasttext_model, fasttext_dimension)  
-    feature_list, label_list = prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, err_gen_dict, funcs_for_attr, fasttext_model, feature_all_dict, resp_path)
+    fasttext_dimension = len(dirty_csv.columns)
+    fasttext.util.reduce_model(fasttext_model, fasttext_dimension)
+    feature_list, label_list = prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, err_gen_dict, enhanced_gen_dict, funcs_for_attr, fasttext_model, feature_all_dict, resp_path)
     return attr, feature_list, label_list
 
 
@@ -351,7 +494,7 @@ def single_val_feat(val, fasttext_m, funcs_for_attr, attr, idx, all_attrs, featu
         return idx, feature
 
 
-def prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, err_gen_dict, funcs_for_attr, fasttext_m, feature_all_dict, resp_path):
+def prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, err_gen_dict, enhanced_gen_dict, funcs_for_attr, fasttext_m, feature_all_dict, resp_path):
     feature_list = []
     label_list = []
     related_attrs = list(related_attrs_dict[attr])
@@ -368,6 +511,18 @@ def prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_att
         label_list.append(1)
     for val in tqdm(err_gen_dict[attr]['dirty'], ncols=120, desc=f"Processing {attr} generated errors"):
         if len(err_gen_dict[attr]['dirty']) == 0 or len(err_gen_dict[attr]['dirty'][0].keys()) < len([attr]+related_attrs):
+            continue
+        feature = single_val_feat(val, fasttext_m, funcs_for_attr, attr, -1, list(dirty_csv.columns), feature_all_dict, resp_path)
+        feature_list.append(feature)
+        label_list.append(1)
+    for val in tqdm(enhanced_gen_dict[attr]['clean'], ncols=120, desc=f"Processing {attr} generated clean data"):
+        if len(enhanced_gen_dict[attr]['clean']) == 0 or len(enhanced_gen_dict[attr]['clean'][0].keys()) < len([attr]+related_attrs):
+            continue
+        feature = single_val_feat(val, fasttext_m, funcs_for_attr, attr, -1, list(dirty_csv.columns), feature_all_dict, resp_path)
+        feature_list.append(feature)
+        label_list.append(0)
+    for val in tqdm(enhanced_gen_dict[attr]['dirty'], ncols=120, desc=f"Processing {attr} generated dirty data"):
+        if len(enhanced_gen_dict[attr]['dirty']) == 0 or len(enhanced_gen_dict[attr]['dirty'][0].keys()) < len([attr]+related_attrs):
             continue
         feature = single_val_feat(val, fasttext_m, funcs_for_attr, attr, -1, list(dirty_csv.columns), feature_all_dict, resp_path)
         feature_list.append(feature)
@@ -791,6 +946,7 @@ if __name__ == "__main__":
     GUIDE_USE = config['model']['guide_use']
     PRE_FUNC_USE = config['model']['pre_func_use']
     FUNC_USE = config['model']['func_use']
+    ENHANCED_USE = config['model']['enhanced_use']
     ERR_GEN_USE = config['model']['err_gen_use']
     REL_TOP = config['model']['rel_top']
     
@@ -802,6 +958,7 @@ if __name__ == "__main__":
     GUIDE_READ = config['read']['guide']
     ERROR_CHECKING_READ = config['read']['error_checking']
     FUNC_READ = config['read']['func']
+    ENHANCED_READ = config['read']['enhanced']
     ERR_GEN_READ = config['read']['err_gen']
     
     # Dataset settings
@@ -835,6 +992,7 @@ if __name__ == "__main__":
             read_guide_path = os.path.join(read_path, 'guide_refine')
             read_error_checking_path = os.path.join(read_path, 'error_checking')
             read_func_path = os.path.join(read_path, 'funcs')
+            read_enhanced_path = os.path.join(read_path, 'enhanced')
             read_pre_func_path = os.path.join(read_path, 'funcs_pre')
             read_err_gen_path = os.path.join(read_path, 'err_gen')
             read_error_path = read_path + 'funcs'
@@ -846,12 +1004,14 @@ if __name__ == "__main__":
             funcs_directory = f'{resp_path}/funcs'
             funcs_pre_directory = f'{resp_path}/funcs_pre'
             err_gen_directory = f'{resp_path}/err_gen'
+            enhanced_gen_directory = f'{resp_path}/enhanced'
             os.makedirs(resp_path, exist_ok=True)
             os.makedirs(guide_directory, exist_ok=True)
             os.makedirs(error_checking_res_directory, exist_ok=True)
             os.makedirs(funcs_directory, exist_ok=True)
             os.makedirs(funcs_pre_directory, exist_ok=True)
             os.makedirs(err_gen_directory, exist_ok=True)
+            os.makedirs(enhanced_gen_directory, exist_ok=True)
             
             dirty_path = base_dir + '/data/' + dataset + '_error-' + str(err_rate) + '.csv'
             clean_path = base_dir + '/data/' + dataset + '_clean.csv'
@@ -931,7 +1091,12 @@ if __name__ == "__main__":
             with Timer('Generating Functions', logger, time_file) as t:
                 err_gen_dict, funcs_for_attr = process_gen_err_funcs(FUNC_USE, FUNC_READ, read_path, read_func_path, read_error_path, resp_path, funcs_directory, dirty_csv, all_attrs, para_file, related_attrs_dict, center_index_value_label_dict, det_wrong_list, det_right_list)
             total_time += t.duration
-            
+
+            enhanced_gen_dict = defaultdict(default_dict_of_lists)
+            with Timer('Generating Enhanced Data', logger, time_file) as t:
+                process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ,  read_enhanced_path, enhanced_gen_directory, dirty_csv, all_attrs, related_attrs_dict, center_index_value_label_dict, enhanced_gen_dict, logger)
+            total_time += t.duration
+
             err_gen_dict = defaultdict(default_dict_of_lists)
             with Timer('Generating Error Data', logger, time_file) as t:
                 process_gen_err_data(ERR_GEN_USE, ERR_GEN_READ, read_err_gen_path, err_gen_directory, dirty_csv, all_attrs, related_attrs_dict, center_index_value_label_dict, err_gen_dict, logger)
@@ -1017,7 +1182,7 @@ if __name__ == "__main__":
             feat_dict_train = {}
             label_dict_train = {}
             for attr in all_attrs:
-                attr, feature_list, label_list = process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, err_gen_dict, funcs_for_attr, feature_all_dict, resp_path)
+                attr, feature_list, label_list = process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, err_gen_dict, enhanced_gen_dict,funcs_for_attr, feature_all_dict, resp_path)
                 feat_dict_train[attr] = feature_list
                 label_dict_train[attr] = label_list
             

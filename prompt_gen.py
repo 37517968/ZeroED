@@ -78,6 +78,97 @@ def error_check_prompt(col_values, col_name):
     return prompt
 
 
+def create_dirty_gen_inst_prompt(clean_vals, dirty_vals, target_attribute, num_errors=20):
+    if len(clean_vals) > 0:
+        temp_vals = clean_vals[0]
+    elif len(dirty_vals) > 0:
+        temp_vals = dirty_vals[0]
+    else:
+        print(f"No vals in clean_vals and dirty_vals of attr {target_attribute}")
+        temp_vals = f"{target_attribute}: none"
+    attrs = re.findall(r"'(\w+)':", str(temp_vals))
+    template_dict_1 = {key: f'{key}_val_1' for key in attrs}
+    template_dict_1[target_attribute] = 'error_value_1'
+    template_dict_2 = {key: f'{key}_val_2' for key in attrs}
+    template_dict_2[target_attribute] = 'error_value_2'
+    
+    prompt = f"""
+You are a data quality analyst with extensive experience in identifying and generating realistic data errors. Your task is to analyze a given dataset and inject different types of errors into clean data for a specific attribute, simulating real-world data quality issues.
+
+I will provide you with a sample of **clean** values in a tabular format for various attributes. Your objectives are to:
+
+1. Analyze the data to identify patterns, relationships, and constraints between attributes.
+2. Focus on the attribute named `{target_attribute}` and inject realistic errors into the provided clean data.
+3. Ensure the errors you generate are diverse and cover multiple error types for each clean value.
+
+Your task is to analyze the data and identify inner relationships. Based on this analysis, inject different types of errors into the provided clean values for the attribute `{target_attribute}` as they might occur in real-world scenarios.
+The types of errors include the following ones:
+1. Pattern Violations: Values that don't match the expected format
+2. Explicit/Implicit Missing Values: Null values or placeholders for missing data
+3. Constraints Violations: Values that conflict with other columns or violate business rules
+4. Out-of-domain values: Values outside the expected range or set
+5. Typos: Spelling or data entry errors
+6. Violate common knowledge: Values that contradict widely known facts
+
+IMPORTANT: For each clean value provided, generate multiple versions with different error types. Each version should have a distinct error type.
+"""
+    prompt += f"For the attribute `{target_attribute}`, here are the given **clean** tuples to inject errors into:\n"
+    prompt += '\n'.join([str(i) for i in clean_vals]) + '\n'
+    if dirty_vals:
+        prompt += f"There are also some **wrong** tuples for reference:\n"
+        prompt += '\n'.join([str(i) for i in dirty_vals]) + '\n\n'
+    prompt += f"Please analyze the data patterns and inject different types of errors into the provided clean values for the attribute `{target_attribute}`. Generate {num_errors} error examples:\n"
+    prompt += f"""
+The output should be in the following strict format:
+['{target_attribute}', error_value_1, Reason: 'Error type1: Specific reason', {str(template_dict_1)}]
+['{target_attribute}', error_value_2, Reason: 'Error type2: Specific reason', {str(template_dict_2)}]
+...
+Please ensure that:
+1. The reasons for each error are clearly specified, explaining the error type.
+2. Each clean value gets multiple versions with different error types.
+3. The generated errors are realistic and diverse.
+4. Do not duplicate the reference wrong values exactly.
+--------------------------------------------------------------------------
+"""
+    return prompt
+
+def create_clean_gen_inst_prompt(clean_vals, target_attribute, num_gen=20):
+    if len(clean_vals) > 0:
+        temp_vals = clean_vals[0]
+    else:
+        print(f"No vals in clean_vals of attr {target_attribute}")
+        temp_vals = f"{target_attribute}: none"
+    attrs = re.findall(r"'(\w+)':", str(temp_vals))
+    template_dict_1 = {key: f'{key}_val_1' for key in attrs}
+    template_dict_1[target_attribute] = 'clean_value_1'
+    template_dict_2 = {key: f'{key}_val_2' for key in attrs}
+    template_dict_2[target_attribute] = 'clean_value_2'
+
+    prompt = f"""
+You are a data quality analyst with extensive experience in generating realistic clean data. Your task is to analyze a given dataset and generate plausible clean values for a specific attribute, following the same distribution and patterns as the provided examples.
+
+I will provide you with a sample of **clean** values in a tabular format for various attributes. Your objectives are to:
+
+1. Analyze the data to identify patterns, relationships, and constraints between attributes.
+2. Focus on the attribute named `{target_attribute}` and generate realistic clean values that follow the same distribution.
+3. Ensure the clean values you generate are diverse but consistent with the data patterns.
+
+Your task is to analyze the data and identify inner relationships. Based on this analysis, generate clean values specifically for the attribute `{target_attribute}` that follow the same patterns and distribution as the examples.
+"""
+    prompt += f"For the attribute `{target_attribute}`, here are the given **clean** tuples as examples:\n"
+    prompt += '\n'.join([str(i) for i in clean_vals]) + '\n\n'
+    prompt += f"Please analyze the data patterns and generate {num_gen} realistic clean values specifically for the attribute `{target_attribute}`:\n"
+    prompt += f"""
+The output should be in the following strict format:
+['{target_attribute}', clean_value_1, Reason: 'Pattern description: Specific reason', {str(template_dict_1)}]
+['{target_attribute}', clean_value_2, Reason: 'Pattern description: Specific reason', {str(template_dict_2)}]
+...
+Please ensure that the reasons for each clean value are clearly specified, explaining the pattern it follows.
+Do not duplicate the reference values exactly, but create new values that follow the same distribution.
+--------------------------------------------------------------------------
+"""
+    return prompt
+
 def create_err_gen_inst_prompt(clean_vals, dirty_vals, target_attribute, num_errors=20):
     if len(clean_vals) > 0:
         temp_vals = clean_vals[0]
