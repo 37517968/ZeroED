@@ -274,3 +274,6 @@ f"    # Value of `{attr_name}` is row[attr]\n"
 "Provide your functions below:\n"
     )
     return prompt
+
+def guide_gen_prompt():
+    return

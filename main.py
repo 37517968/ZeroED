@@ -26,7 +26,7 @@ from measure import measure_detect
 from prompt_gen import (create_err_gen_inst_prompt, err_clean_func_prompt,
                         error_check_prompt, pre_func_prompt,
                         create_clean_gen_inst_prompt, create_dirty_gen_inst_prompt,
-                        #guide_gen_prompt, 
+                        guide_gen_prompt, 
                         )
 from utility import (Logger, Timer, copy_file, copy_read_files_in_dir,
                      default_dict_of_lists, get_ans_from_llm, query_base,
