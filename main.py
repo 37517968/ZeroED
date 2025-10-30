@@ -95,6 +95,101 @@ def extract_err_info(text, attr):
     return information
 
 
+def extract_enhanced_info(text, attr):
+    """
+    增强版错误信息提取函数，能够处理包含特殊字符的复杂字符串
+    解决原 extract_err_info 函数在解析包含单引号、连字符等特殊字符时失败的问题
+    """
+    information = []
+    attr_name = attr
+    lines = text.split('\n')
+    for line in lines:
+        err_info = []
+        match = re.search(r'\[(.*?)\]', line)
+        if match:
+            try:
+                data = match.group().replace("Reason: '", "'Reason: ")
+                # 尝试使用 ast.literal_eval 解析
+                try:
+                    parsed_data = ast.literal_eval(data)
+                except (SyntaxError, ValueError) as e:
+                    # 如果 ast.literal_eval 失败，使用自定义解析逻辑
+                    print(f"ast.literal_eval failed for line: {line}, error: {e}")
+                    # 使用自定义解析函数
+                    parsed_data = parse_complex_list(data)
+                
+                err_info.append(attr_name)
+                for i, content in enumerate(parsed_data):
+                    if i != len(parsed_data) - 1 and i != 0:
+                        err_info.append(str(content))
+                    elif i == len(parsed_data) - 1:
+                        err_info.append(content)
+            except Exception as e:
+                print("\n\nWhen processing error_err_info_enhanced():" + line + "--" + attr)
+                print(e)
+        information.append(err_info)
+    information = list(filter(None, information))
+    return information
+
+
+def parse_complex_list(data_str):
+    """
+    解析包含特殊字符的复杂列表字符串
+    处理包含单引号、连字符、O'Hare等特殊字符的情况
+    """
+    try:
+        # 移除外层方括号
+        content = data_str.strip('[]')
+        
+        # 使用正则表达式分割元素，考虑引号内的逗号和特殊字符
+        # 这个模式可以处理：
+        # 1. 单引号字符串: 'text'
+        # 2. 双引号字符串: "text"
+        # 3. 字典: {...}
+        # 4. 不含逗号的普通文本
+        pattern = r'(\'[^\']*\'|"[^"]*"|\{[^}]*\}|[^,]+)'
+        matches = re.findall(pattern, content)
+        
+        # 清理每个元素
+        parsed_data = []
+        for match in matches:
+            match = match.strip()
+            # 如果是字典，保持原样
+            if match.startswith('{') and match.endswith('}'):
+                try:
+                    # 尝试解析字典
+                    dict_match = re.match(r'\{(.*)\}', match)
+                    if dict_match:
+                        dict_content = dict_match.group(1)
+                        # 分割字典键值对
+                        kv_pairs = re.findall(r'([^:]+):\s*(\'[^\']*\'|"[^"]*"|[^,]+)', dict_content)
+                        result_dict = {}
+                        for k, v in kv_pairs:
+                            k = k.strip().strip('\'"')
+                            v = v.strip().strip('\'"')
+                            result_dict[k] = v
+                        parsed_data.append(result_dict)
+                    else:
+                        parsed_data.append(match)
+                except:
+                    parsed_data.append(match)
+            else:
+                # 移除引号
+                parsed_data.append(match.strip('\'"'))
+        
+        return parsed_data
+    except Exception as e:
+        print(f"Error in parse_complex_list: {e}")
+        # 如果所有方法都失败，返回原始字符串的简单分割
+        try:
+            # 最后的备选方案：简单分割并清理
+            content = data_str.strip('[]')
+            parts = content.split(',')
+            return [part.strip().strip('\'"') for part in parts]
+        except:
+            return []
+
+
 def gen_dirty_funcs(attr, clean_info, errs_info):
     dirty_str = "\n"
     clean_info = '\n'.join([str(i) for i in clean_info])
@@ -144,7 +239,7 @@ def process_gen_err_data(ERR_GEN_USE, ERR_GEN_READ, read_err_gen_path, err_gen_d
             results = [executor.submit(task_gen_err_data, attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, err_gen_dict) for attr in all_attrs]
             outputs = [result.result() for result in results]
 
-def process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ, read_enhanced_path, enhanced_data_directory, dirty_csv, all_attrs, related_attrs_dict, center_index_value_label_dict, enhanced_gen_dict, logger):
+def process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ, read_enhanced_path, enhanced_data_directory, dirty_csv, all_attrs, related_attrs_dict, center_index_value_label_dict, enhanced_gen_dict, num_gen, logger):
     if ENHANCED_USE and ENHANCED_READ:
         copy_read_files_in_dir(enhanced_data_directory, read_enhanced_path)
         for attr in all_attrs:
@@ -176,7 +271,7 @@ def process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ, read_enhanced_path, e
     elif ENHANCED_USE and not ENHANCED_READ:
         # 改为单线程处理，便于调试
         for attr in all_attrs:
-            task_gen_enhanced_data(attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, enhanced_gen_dict, num_gen=50)
+            task_gen_enhanced_data(attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, enhanced_gen_dict, num_gen=num_gen)
 
 def task_gen_err_data(attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, err_gen_dict):
     related_attrs = list(related_attrs_dict[attr]) 
@@ -269,7 +364,7 @@ def task_gen_enhanced_data(attr, dirty_csv, center_index_value_label_dict, relat
     clean_gen_prompt_file.close()
     clean_gen_file.write(clean_gen_ans)
     clean_gen_file.close()
-    clean_info = extract_err_info(clean_gen_ans, attr)
+    clean_info = extract_enhanced_info(clean_gen_ans, attr)
 
     # 处理干净数据，获取filtered_clean
     filtered_clean = []
@@ -309,7 +404,7 @@ def task_gen_enhanced_data(attr, dirty_csv, center_index_value_label_dict, relat
     dirty_gen_prompt_file.close()
     dirty_gen_file.write(dirty_gen_ans)
     dirty_gen_file.close()
-    dirty_info = extract_err_info(dirty_gen_ans, attr)
+    dirty_info = extract_enhanced_info(dirty_gen_ans, attr)
     filtered_dirty = []
     filtered_dirty.extend(wrong_values)
     for dirty in dirty_info:
@@ -1094,7 +1189,7 @@ if __name__ == "__main__":
 
             enhanced_gen_dict = defaultdict(default_dict_of_lists)
             with Timer('Generating Enhanced Data', logger, time_file) as t:
-                process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ,  read_enhanced_path, enhanced_gen_directory, dirty_csv, all_attrs, related_attrs_dict, center_index_value_label_dict, enhanced_gen_dict, logger)
+                process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ,  read_enhanced_path, enhanced_gen_directory, dirty_csv, all_attrs, related_attrs_dict, center_index_value_label_dict, enhanced_gen_dict, 10, logger)
             total_time += t.duration
 
             err_gen_dict = defaultdict(default_dict_of_lists)
