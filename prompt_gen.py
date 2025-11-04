@@ -93,31 +93,23 @@ def create_dirty_gen_inst_prompt(clean_vals, dirty_vals, target_attribute, num_e
     template_dict_2[target_attribute] = 'error_value_2'
     
     prompt = f"""
-You are a data quality analyst with extensive experience in identifying and generating realistic data errors. Your task is to analyze a given dataset and inject different types of errors into clean data for a specific attribute, simulating real-world data quality issues.
+You are a data quality analyst. Your task is to inject realistic errors into clean data for the attribute `{target_attribute}`.
 
-I will provide you with a sample of **clean** values in a tabular format for various attributes. Your objectives are to:
+Guidelines:
+1. If there are existing **wrong tuples** (`dirty_vals`) provided, generate new errors that are **similar in type and pattern** but **not identical** to the reference errors.
+2. Only if no reference errors are available, generate plausible real-world errors for the attribute.
+3. Preserve the general format and value type of the clean data.
+4. Output errors in the same schema as the clean values.
 
-1. Analyze the data to identify patterns, relationships, and constraints between attributes.
-2. Focus on the attribute named `{target_attribute}` and inject realistic errors into the provided clean data.
-3. Ensure the errors you generate are diverse and cover multiple error types for each clean value.
-
-Your task is to analyze the data and identify inner relationships. Based on this analysis, inject different types of errors into the provided clean values for the attribute `{target_attribute}` as they might occur in real-world scenarios.
-The types of errors include the following ones:
-1. Pattern Violations: Values that don't match the expected format
-2. Explicit/Implicit Missing Values: Null values or placeholders for missing data
-3. Constraints Violations: Values that conflict with other columns or violate business rules
-4. Out-of-domain values: Values outside the expected range or set
-5. Typos: Spelling or data entry errors
-6. Violate common knowledge: Values that contradict widely known facts
-
-IMPORTANT: For each clean value provided, generate multiple versions with different error types. Each version should have a distinct error type.
+Clean values for `{target_attribute}`:
 """
-    prompt += f"For the attribute `{target_attribute}`, here are the given **clean** tuples to inject errors into:\n"
-    prompt += '\n'.join([str(i) for i in clean_vals]) + '\n'
+    if clean_vals:
+        prompt += f"For the attribute `{target_attribute}`, here are the given **clean** tuples to inject errors into:\n"
+        prompt += '\n'.join([str(i) for i in clean_vals]) + '\n'
     if dirty_vals:
         prompt += f"There are also some **wrong** tuples for reference:\n"
         prompt += '\n'.join([str(i) for i in dirty_vals]) + '\n\n'
-    prompt += f"Please analyze the data patterns and inject different types of errors into the provided clean values for the attribute `{target_attribute}`. Generate {num_errors} error examples:\n"
+    prompt += f"Please generate {num_errors} new error examples for the attribute `{target_attribute}`, following the rules above.\n"
     prompt += f"""
 The output should be in the following strict format:
 ['{target_attribute}', error_value_1, Reason: 'Error type1: Specific reason', {str(template_dict_1)}]
