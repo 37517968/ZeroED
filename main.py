@@ -10,6 +10,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from scipy import stats
 
 import fasttext.util
 import numpy as np
@@ -20,7 +21,7 @@ from sklearn.neural_network import MLPClassifier
 from tqdm import tqdm
 
 from distri_analys import LLMDataDistrAnalyzer
-from feature import cluster
+from feature import cluster, feat_gen_df
 from get_rel_attrs import (cal_all_column_nmi, cal_strong_res_column_nmi)
 from measure import measure_detect
 from prompt_gen import (create_err_gen_inst_prompt, err_clean_func_prompt,
@@ -33,7 +34,18 @@ from utility import (Logger, Timer, copy_file, copy_read_files_in_dir,
                      rag_query, split_list_to_sublists, get_read_paths)
 
 
-def subtask_det_initial(val_list, attr_name):
+def subtask_det_initial(val_list, attr_name, indices):
+    """
+    处理LLM标注任务，针对指定的indices
+    
+    Args:
+        val_list: 值列表
+        attr_name: 属性名
+        indices: 数据集中的索引列表，用于保存标注结果时关联
+    
+    Returns:
+        LLM响应
+    """
     str_list = [str(a_val) for a_val in val_list]
     vals_str = '\n'.join(str_list)
     prompt = error_check_prompt(vals_str, attr_name)
@@ -41,10 +53,20 @@ def subtask_det_initial(val_list, attr_name):
         response = rag_query(prompt, guide_content[attr_name])
     else:
         response = query_base(prompt)
-    error_check_prompt_file = open(os.path.join(error_checking_res_directory, f'prompt_error_checking_{attr_name}.txt'), 'w', encoding='utf-8')
+    
+    # 保存提示和响应，同时保存indices信息
+    error_check_prompt_file = open(os.path.join(error_checking_res_directory, f'prompt_error_checking_{attr_name}.txt'), 'a', encoding='utf-8')
     error_check_prompt_file.write(prompt + '\n\n')
     error_check_prompt_file.close()
-    return response 
+    
+    # 保存响应和indices信息，使用追加模式
+    error_checking_file = open(os.path.join(error_checking_res_directory, f'error_checking_{attr_name}.txt'), 'a', encoding='utf-8')
+    # 在响应前添加indices信息，格式为: // indices: [idx1, idx2, ...]
+    error_checking_file.write(f"// indices: {indices}\n")
+    error_checking_file.write(response + '\n\n')
+    error_checking_file.close()
+    
+    return response
 
 
 def extract_func(text_content):
@@ -239,7 +261,7 @@ def process_gen_err_data(ERR_GEN_USE, ERR_GEN_READ, read_err_gen_path, err_gen_d
             results = [executor.submit(task_gen_err_data, attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, err_gen_dict) for attr in all_attrs]
             outputs = [result.result() for result in results]
 
-def process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ, read_enhanced_path, enhanced_data_directory, dirty_csv, all_attrs, related_attrs_dict, center_index_value_label_dict, enhanced_gen_dict, num_gen, logger):
+def process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ, read_enhanced_path, enhanced_data_directory, dirty_csv, all_attrs, related_attrs_dict, index_value_label_dict, enhanced_gen_dict, num_gen, logger):
     if ENHANCED_USE and ENHANCED_READ:
         copy_read_files_in_dir(enhanced_data_directory, read_enhanced_path)
         for attr in all_attrs:
@@ -271,16 +293,16 @@ def process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ, read_enhanced_path, e
     elif ENHANCED_USE and not ENHANCED_READ:
         # 改为单线程处理，便于调试
         for attr in all_attrs:
-            task_gen_enhanced_data(attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, enhanced_gen_dict, num_gen=num_gen)
+            task_gen_enhanced_data(attr, dirty_csv, index_value_label_dict, related_attrs_dict, enhanced_gen_dict, num_gen=num_gen)
 
-def task_gen_err_data(attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, err_gen_dict):
+def task_gen_err_data(attr, dirty_csv, index_value_label_dict, related_attrs_dict, err_gen_dict):
     related_attrs = list(related_attrs_dict[attr]) 
     err_gen_prompt_file = open(os.path.join(err_gen_directory, f"prompt_ans_error_gen_{attr}.txt"), 'w', encoding='utf-8')
     err_gen_file = open(os.path.join(err_gen_directory, f"error_gen_{attr}.txt"), 'w', encoding='utf-8')
     wrong_values = []
     right_values = []
     used_idx_list = {}
-    for idx, _, label in center_index_value_label_dict[attr]:
+    for idx, _, label in index_value_label_dict[attr]:
         if label == 1:  
             wrong_values.append(dirty_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
             used_idx_list[idx] = 1
@@ -319,7 +341,7 @@ def task_gen_err_data(attr, dirty_csv, center_index_value_label_dict, related_at
         err_gen_res_file.write('\n')
     err_gen_res_file.close()
 
-def task_gen_enhanced_data(attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, enhanced_gen_dict, num_gen):
+def task_gen_enhanced_data(attr, dirty_csv, index_value_label_dict, related_attrs_dict, enhanced_gen_dict, num_gen):
     related_attrs = list(related_attrs_dict[attr])
     clean_gen_prompt_file = open(os.path.join(enhanced_gen_directory, f"prompt_ans_clean_gen_{attr}.txt"), 'w', encoding='utf-8')
     dirty_gen_prompt_file = open(os.path.join(enhanced_gen_directory, f"prompt_ans_dirty_gen_{attr}.txt"), 'w', encoding='utf-8')
@@ -328,7 +350,7 @@ def task_gen_enhanced_data(attr, dirty_csv, center_index_value_label_dict, relat
     wrong_values = []
     right_values = []
     used_idx_list = {}
-    for idx, _, label in center_index_value_label_dict[attr]:
+    for idx, _, label in index_value_label_dict[attr]:
         if label == 1:
             wrong_values.append(dirty_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
             used_idx_list[idx] = 1
@@ -436,7 +458,7 @@ def gen_err_funcs(attr, err_gen_dict):
     wrong_values = []
     right_values = []
     used_idx_list = {}
-    for idx, _, label in center_index_value_label_dict[attr]:
+    for idx, _, label in index_value_label_dict[attr]:
         if label == 1:  # wrong 
             wrong_values.append(dirty_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
             used_idx_list[idx] = 1
@@ -512,23 +534,40 @@ def task_func_gen(attr_name, err_gen_dict):
         return {attr_name: {'clean': [], 'dirty': []}}
 
 
-def task_det_initial(attr_name, error_checking_res_directory):
-    error_checking_file = open(os.path.join(error_checking_res_directory, f'error_checking_{attr_name}.txt'), 'w', encoding='utf-8')
+def task_det_initial(attr_name, error_checking_res_directory, indices):
+    """
+    处理特定属性的初始错误检测，针对指定的indices
+    
+    Args:
+        attr_name: 属性名
+        error_checking_res_directory: 错误检查结果目录
+        indices: 数据集中的索引列表
+    """
+    # 清空文件，以追加模式写入
+    if not os.path.exists(os.path.join(error_checking_res_directory, f'error_checking_{attr_name}.txt')):
+        error_checking_file = open(os.path.join(error_checking_res_directory, f'error_checking_{attr_name}.txt'), 'w', encoding='utf-8')
+        error_checking_file.close()
+    
     related_attrs = list(related_attrs_dict[attr_name])
-    center_idx = cluster_index_dict[attr_name][0]    
-    df_center_idx = ["{" + ",".join(f'"{col}":"{dirty_csv.loc[idx, col]}"' for col in [attr_name] + related_attrs) + "}" for idx in center_idx]
-    split_center_values = split_list_to_sublists(df_center_idx, err_check_val_num_per_query)
+    
+    # 为每个索引创建数据字典
+    df_indices = ["{" + ",".join(f'"{col}":"{dirty_csv.loc[idx, col]}"' for col in [attr_name] + related_attrs) + "}" for idx in indices]
+    
+    # 将数据分成子列表进行处理
+    split_values = split_list_to_sublists(df_indices, err_check_val_num_per_query)
+    
+    # 将索引也分成对应的子列表
+    split_indices = split_list_to_sublists(indices, err_check_val_num_per_query)
+    
     error_response = ''
     # 改为单线程处理，便于调试
-    for sub_list_values in split_center_values:
+    for sub_list_values, sub_list_indices in zip(split_values, split_indices):
         try:
-            error_response += subtask_det_initial(sub_list_values, attr_name) + '\n'
+            error_response += subtask_det_initial(sub_list_values, attr_name, sub_list_indices) + '\n'
         except Exception as e:
             print(f"处理属性 {attr_name} 的子任务时出错: {str(e)}")
             import traceback
             traceback.print_exc()
-    error_checking_file.write(error_response)
-    error_checking_file.close()
 
 
 def normalize_string(s):
@@ -540,11 +579,11 @@ def normalize_string(s):
                .replace("'", '"'))
 
 
-def process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, err_gen_dict, enhanced_gen_dict, funcs_for_attr, feature_all_dict, resp_path):
+def process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, enhanced_gen_dict, funcs_for_attr, feature_all_dict, resp_path):
     fasttext_model = fasttext.load_model('./cc.en.300.bin')
     fasttext_dimension = len(dirty_csv.columns)
     fasttext.util.reduce_model(fasttext_model, fasttext_dimension)
-    feature_list, label_list = prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, err_gen_dict, enhanced_gen_dict, funcs_for_attr, fasttext_model, feature_all_dict, resp_path)
+    feature_list, label_list = prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, enhanced_gen_dict, funcs_for_attr, fasttext_model, feature_all_dict, resp_path)
     return attr, feature_list, label_list
 
 
@@ -573,23 +612,45 @@ def single_val_feat(val, fasttext_m, funcs_for_attr, attr, idx, all_attrs, featu
             if len(fasttext_feat) == 0 or len(fasttext_feat) < len(all_attrs):
                 fasttext_feat = []
                 fasttext_m = fasttext.load_model('./cc.en.300.bin')
-                fasttext_dimension = len(all_attrs)  
-                fasttext.util.reduce_model(fasttext_m, fasttext_dimension)  
-                for a_val in val.values():
-                    fasttext_feat.extend(fasttext_m.get_word_vector(str(a_val)))
+                fasttext_dimension = len(all_attrs)
+                fasttext.util.reduce_model(fasttext_m, fasttext_dimension)
+                # 检查val的类型，如果是numpy.ndarray，直接遍历；如果是字典或Series，使用values()
+                if isinstance(val, np.ndarray):
+                    for a_val in val:
+                        fasttext_feat.extend(fasttext_m.get_word_vector(str(a_val)))
+                else:
+                    # 假设是字典或Pandas Series
+                    try:
+                        for a_val in val.values():
+                            fasttext_feat.extend(fasttext_m.get_word_vector(str(a_val)))
+                    except AttributeError:
+                        # 如果还是没有values()方法，直接遍历
+                        for a_val in val:
+                            fasttext_feat.extend(fasttext_m.get_word_vector(str(a_val)))
             feature.extend(fasttext_feat)
         else:
             fasttext_m = fasttext.load_model('./cc.en.300.bin')
-            fasttext_dimension = len(all_attrs)  
-            fasttext.util.reduce_model(fasttext_m, fasttext_dimension)  
+            fasttext_dimension = len(all_attrs)
+            fasttext.util.reduce_model(fasttext_m, fasttext_dimension)
             fasttext_feat = []
-            for a_val in val.values():
-                fasttext_feat.extend(fasttext_m.get_word_vector(str(a_val)))
+            # 检查val的类型，如果是numpy.ndarray，直接遍历；如果是字典或Series，使用values()
+            if isinstance(val, np.ndarray):
+                for a_val in val:
+                    fasttext_feat.extend(fasttext_m.get_word_vector(str(a_val)))
+            else:
+                # 假设是字典或Pandas Series
+                try:
+                    for a_val in val.values():
+                        fasttext_feat.extend(fasttext_m.get_word_vector(str(a_val)))
+                except AttributeError:
+                    # 如果还是没有values()方法，直接遍历
+                    for a_val in val:
+                        fasttext_feat.extend(fasttext_m.get_word_vector(str(a_val)))
             feature.extend(fasttext_feat)
         return idx, feature
 
 
-def prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, err_gen_dict, enhanced_gen_dict, funcs_for_attr, fasttext_m, feature_all_dict, resp_path):
+def prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, enhanced_gen_dict, funcs_for_attr, fasttext_m, feature_all_dict, resp_path):
     feature_list = []
     label_list = []
     related_attrs = list(related_attrs_dict[attr])
@@ -601,12 +662,6 @@ def prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_att
         feature_list.append(feature)
         label_list.append(0)
     for idx, val in tqdm(wrong_values, ncols=120, desc=f"Processing {attr} wrong values"):
-        feature = single_val_feat(val, fasttext_m, funcs_for_attr, attr, -1, list(dirty_csv.columns), feature_all_dict, resp_path)
-        feature_list.append(feature)
-        label_list.append(1)
-    for val in tqdm(err_gen_dict[attr]['dirty'], ncols=120, desc=f"Processing {attr} generated errors"):
-        if len(err_gen_dict[attr]['dirty']) == 0 or len(err_gen_dict[attr]['dirty'][0].keys()) < len([attr]+related_attrs):
-            continue
         feature = single_val_feat(val, fasttext_m, funcs_for_attr, attr, -1, list(dirty_csv.columns), feature_all_dict, resp_path)
         feature_list.append(feature)
         label_list.append(1)
@@ -812,6 +867,186 @@ def process_guidlines(GUIDE_USE, GUIDE_READ, dataset, read_path, read_guide_path
                 result = future.result()
     return guide_content
 
+def calculate_jsd(p, q):
+    """
+    计算Jensen-Shannon Divergence (JSD)
+    JSD(P||Q) = 0.5 * KL(P||M) + 0.5 * KL(Q||M)
+    其中 M = 0.5 * (P + Q)
+    """
+    # 确保p和q是概率分布（和为1）
+    p = np.asarray(p, dtype=np.float64)
+    q = np.asarray(q, dtype=np.float64)
+    
+    # 归一化
+    p = p / np.sum(p)
+    q = q / np.sum(q)
+    
+    # 避免零值
+    p = np.where(p == 0, 1e-10, p)
+    q = np.where(q == 0, 1e-10, q)
+    
+    # 计算M
+    m = 0.5 * (p + q)
+    
+    # 计算KL散度
+    kl_pm = np.sum(p * np.log(p / m))
+    kl_qm = np.sum(q * np.log(q / m))
+    
+    # 计算JSD
+    jsd = 0.5 * (kl_pm + kl_qm)
+    return jsd
+
+
+def calculate_ksd(sample1, sample2):
+    """
+    计算Kolmogorov-Smirnov Distance (KSD)
+    使用scipy的ks_2samp函数计算两个样本之间的KS距离
+    """
+    # 确保输入是numpy数组
+    sample1 = np.asarray(sample1)
+    sample2 = np.asarray(sample2)
+    
+    # 计算KS统计量和p值
+    ks_statistic, p_value = stats.ks_2samp(sample1, sample2)
+    
+    # 返回KS统计量作为距离度量
+    return ks_statistic
+
+
+def process_select_optimal_cluster(
+    enhanced_gen_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict,
+     funcs_for_attr, feature_all_dict, resp_path, logger, index_value_label_dict, residual_method='both'
+):
+    """
+    从聚类结果中选出一个聚类并与增强数据合并，使其与dirty_csv的残差最小
+    """
+    optimal_cluster_info_dict = {}
+    
+    
+    logger.info("开始选择最优聚类...")
+
+    for attr in all_attrs:
+        min_residual = float('inf')
+        logger.info(f"处理属性: {attr}")
+        
+        # 获取该属性的聚类信息
+        if attr not in cluster_index_dict:
+            logger.warning(f"属性 {attr} 不在聚类索引字典中，跳过")
+            continue
+            
+        clusters = cluster_index_dict[attr]
+        if len(clusters) == 0:
+            logger.warning(f"属性 {attr} 没有有效聚类，跳过")
+            continue
+            
+        related_attrs = list(related_attrs_dict[attr])
+
+        # 加载 fastText
+        fasttext_model = fasttext.load_model('./cc.en.300.bin')
+        fasttext_dimension = len(dirty_csv.columns)
+        fasttext.util.reduce_model(fasttext_model, fasttext_dimension)
+
+        ref_data = dirty_csv.loc[:, [attr] + related_attrs]
+        col_num = list(ref_data.columns).index(attr)
+        ref_feature_list, ref_feature_dict = feat_gen_df(ref_data, col_num, attr, related_attrs_dict, funcs_for_attr, resp_path)
+
+        ref_features = np.array(ref_feature_list, dtype=np.float64)
+
+        # 遍历聚类
+        for cluster_idx, cluster_indices in enumerate(clusters):
+            if len(cluster_indices) == 0:
+                continue
+                
+            cluster_data = dirty_csv.loc[cluster_indices, [attr] + related_attrs]
+            
+            # 合并增强数据
+            enhanced_data = []
+            if attr in enhanced_gen_dict:
+                enhanced_data.extend(enhanced_gen_dict[attr].get('clean', []))
+                enhanced_data.extend(enhanced_gen_dict[attr].get('dirty', []))
+            enhanced_df = pd.DataFrame(enhanced_data) if enhanced_data else pd.DataFrame()
+            
+            # 合并标注数据
+            labeled_data = []
+            if attr in index_value_label_dict:
+                for idx, value, label in index_value_label_dict[attr]:
+                    # 只添加不在当前聚类中的标注数据，避免重复
+                    if idx not in cluster_indices:
+                        labeled_data.append(value)
+            labeled_df = pd.DataFrame(labeled_data) if labeled_data else pd.DataFrame()
+            
+            # 合并所有数据
+            combined_data = pd.concat([cluster_data, enhanced_df, labeled_df], ignore_index=True)
+            
+            # === 计算 combined_data 的特征 ===
+            col_num = list(combined_data.columns).index(attr)
+            combined_feature_list, combined_feature_dict = feat_gen_df(combined_data, col_num, attr, related_attrs_dict, funcs_for_attr, resp_path)
+            combined_feature_list = np.array(combined_feature_list, dtype=np.float64)
+            # 处理可能的NaN或无限值
+            combined_feature_list = np.nan_to_num(combined_feature_list)
+
+            
+
+            # === 计算残差 ===
+            try:
+                if residual_method in ['jsd', 'both']:
+                    # 使用直方图估计分布
+                    hist_comb, _ = np.histogram(combined_feature_list.flatten(), bins=30, density=True)
+                    hist_ref, _ = np.histogram(ref_features.flatten(), bins=30, density=True)
+                    jsd_residual = calculate_jsd(hist_comb, hist_ref)
+                else:
+                    jsd_residual = float('inf')
+
+                if residual_method in ['ksd', 'both']:
+                    # 对特征分量取平均后计算KSD
+                    # 检查数组维度，如果是1维则直接使用，否则在axis=1上取平均
+                    if combined_feature_list.ndim > 1:
+                        mean_comb = np.mean(combined_feature_list, axis=1)
+                    else:
+                        mean_comb = combined_feature_list
+                    
+                    if ref_features.ndim > 1:
+                        mean_ref = np.mean(ref_features, axis=1)
+                    else:
+                        mean_ref = ref_features
+                    
+                    ksd_residual = calculate_ksd(mean_comb, mean_ref)
+                else:
+                    ksd_residual = float('inf')
+
+                if residual_method == 'both':
+                    combined_residual = 0.5 * jsd_residual + 0.5 * ksd_residual
+                elif residual_method == 'jsd':
+                    combined_residual = jsd_residual
+                else:
+                    combined_residual = ksd_residual
+
+                logger.info(f"{attr} 聚类 {cluster_idx}: JSD={jsd_residual:.4f}, KSD={ksd_residual:.4f}, 综合={combined_residual:.4f}")
+
+                # === 选择最优聚类 ===
+                if combined_residual < min_residual:
+                    min_residual = combined_residual
+                    optimal_cluster_info_dict[attr] = {
+                    'cluster_idx': cluster_idx,
+                    'cluster_indices': cluster_indices,
+                    'jsd_residual': jsd_residual,
+                    'ksd_residual': ksd_residual,
+                    'combined_residual': combined_residual,
+                    'enhanced_data': enhanced_data
+                }
+
+            except Exception as e:
+                logger.error(f"计算属性 {attr} 聚类 {cluster_idx} 残差时出错: {str(e)}")
+                continue
+
+    if optimal_cluster_info_dict:
+        logger.info("最优聚类信息:")
+        for attr, cluster_info in optimal_cluster_info_dict.items():
+            logger.info(f"属性 {attr} 聚类 {cluster_info['cluster_idx']}，综合残差 {cluster_info['combined_residual']:.4f}")
+    else:
+        logger.warning("未找到有效的最优聚类")
+    
+    return optimal_cluster_info_dict
 
 def process_error_checking(ERROR_CHECKING_READ, read_error_checking_path, all_attrs, error_checking_res_directory):
     if ERROR_CHECKING_READ:
@@ -828,7 +1063,7 @@ def process_error_checking(ERROR_CHECKING_READ, read_error_checking_path, all_at
                 traceback.print_exc()
 
 
-def measure_llm_label(resp_path, clean_csv, all_attrs, related_attrs_dict, gt_wrong_dict, center_index_value_label_dict):
+def measure_llm_label(resp_path, clean_csv, all_attrs, related_attrs_dict, gt_wrong_dict, index_value_label_dict):
     llm_label_eval_file = open(os.path.join(resp_path, 'llm_label_results.txt'), 'w', encoding='utf-8')
     overall_wrong_label_num = 0
     overall_lwrong_num = 0
@@ -842,7 +1077,7 @@ def measure_llm_label(resp_path, clean_csv, all_attrs, related_attrs_dict, gt_wr
         llm_lwrong_num = 0
         llm_lright_num = 0
         llm_miss_wrong_num = 0
-        for idx, llm_lstr, llm_label in center_index_value_label_dict[attr]:
+        for idx, llm_lstr, llm_label in index_value_label_dict[attr]:
             if llm_label == 1:
                 llm_lwrong_num += 1
                 overall_lwrong_num += 1
@@ -886,56 +1121,174 @@ def right_pat_in_text_attr(attr):
     return pattern
 
 
-def extract_llm_label_res(all_attrs, error_checking_res_directory, cluster_index_dict, center_value_dict):
+def extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict):
+    """
+    从LLM标注结果中提取标签，针对指定的indices
+    
+    Args:
+        all_attrs: 所有属性列表
+        error_checking_res_directory: 错误检查结果目录
+        cluster_index_dict: 聚类索引字典
+        center_value_dict: 中心值字典
+        indices_dict: 指定要提取的indices字典，格式为 {attr: [idx1, idx2, ...]}
+    
+    Returns:
+        索引值标签字典
+    """
     all_extracted_values = defaultdict(list)
+    index_value_label_dict = defaultdict(list)
+    
     for attr in all_attrs:
         content = ""
         with open(os.path.join(error_checking_res_directory, f'error_checking_{attr}.txt'), 'r', encoding='utf-8') as f:
             content = f.read()
         content = content.replace('\\+', '').replace('\\n', '\n')
+        
+        # 提取错误值
         wrong_pattern = err_pat_in_text_attr(attr)
         matches = re.finditer(wrong_pattern, content)
         all_extracted_values[attr].extend([match.group(1).replace("':'", "': '").replace(',', ', ').replace(',  ', ', ').replace('"', "'") for match in matches])
         all_extracted_values[attr] = [normalize_string(match).replace('"{', '{', 1)[:-1] for match in all_extracted_values[attr]]
-        all_extracted_values[attr] = list(set(all_extracted_values[attr])) 
-        # # try handling conflictions
+        all_extracted_values[attr] = list(set(all_extracted_values[attr]))
+        
+        # 处理冲突值
         right_pattern = right_pat_in_text_attr(attr)
         right_matches = re.finditer(right_pattern, content)
         right_matches = [match.group(1).replace("':'", "': '").replace(',', ', ').replace(',  ', ', ').replace('"', "'") for match in right_matches]
         right_matches = [normalize_string(match).replace('"{', '{', 1)[:-1] for match in right_matches]
         all_extracted_values[attr] = [extr_vals for extr_vals in all_extracted_values[attr] if extr_vals not in right_matches]
-    for key, value in center_value_dict.items():
-        temp_list = []
-        for i in range(len(value)): 
-            if normalize_string(str(value[i])) in all_extracted_values[key]:
-                temp_list.append((cluster_index_dict[key][0][i], value[i], 1))
-            else:
-                temp_list.append((cluster_index_dict[key][0][i], value[i], 0))
-        center_index_value_label_dict[key] = temp_list
-    return center_index_value_label_dict
+    
+    # 使用指定的indices
+    for attr in all_attrs:
+        if attr in indices_dict:
+            indices = indices_dict[attr]
+            temp_list = []
+            for idx in indices:
+                # 获取该索引处的值
+                related_attrs = list(related_attrs_dict[attr])
+                value = dirty_csv.loc[idx, [attr] + related_attrs].to_dict()
+                # 检查该值是否在错误值列表中
+                if normalize_string(str(value)) in all_extracted_values[attr]:
+                    temp_list.append((idx, value, 1))
+                else:
+                    temp_list.append((idx, value, 0))
+            index_value_label_dict[attr] = temp_list
+    
+    return index_value_label_dict
 
 
-def label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, center_index_value_label_dict):
-    det_wrong_list = []    
-    det_right_list = []    
-    for key, value in cluster_index_dict.items():
-        for center_index in value[0]:
-            temp_cluster = []
-            for i in range(1, len(value)):
-                if center_index in value[i]:
-                    temp_cluster.extend(value[i])
+def save_indices_labels(indices_dict, labels_dict, file_path):
+    """
+    保存任意indices的标注结果到文件
+    
+    Args:
+        indices_dict: indices字典，格式为 {attr: [idx1, idx2, ...]}
+        labels_dict: 标签字典，格式为 {attr: [(idx, value, label), ...]}
+        file_path: 保存文件路径
+    """
+    save_data = {
+        'indices_dict': indices_dict,
+        'labels_dict': labels_dict
+    }
+    
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(save_data, f, ensure_ascii=False, indent=4)
+
+
+def load_indices_labels(file_path):
+    """
+    从文件加载任意indices的标注结果
+    
+    Args:
+        file_path: 加载文件路径
+    
+    Returns:
+        indices_dict: indices字典，格式为 {attr: [idx1, idx2, ...]}
+        labels_dict: 标签字典，格式为 {attr: [(idx, value, label), ...]}
+    """
+    with open(file_path, 'r', encoding='utf-8') as f:
+        save_data = json.load(f)
+    
+    return save_data['indices_dict'], save_data['labels_dict']
+
+
+def label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, index_value_label_dict):
+    """
+    根据标注结果在聚类内扩散标签
+    
+    Args:
+        resp_path: 响应路径
+        dirty_path: 脏数据路径
+        clean_path: 清洁数据路径
+        cluster_index_dict: 聚类索引字典
+        index_value_label_dict: 索引值标签字典
+    
+    Returns:
+        det_wrong_list: 检测到的错误列表
+        det_right_list: 检测到的正确列表
+    """
+    det_wrong_list = []
+    det_right_list = []
+    
+    # 首先添加已有标签的数据
+    for attr, label_list in index_value_label_dict.items():
+        for idx, value, label in label_list:
+            if label == 1:
+                det_wrong_list.append((idx, attr))
+            elif label == 0:
+                det_right_list.append((idx, attr))
+    
+    # 然后在聚类内扩散标签
+    for attr, clusters in cluster_index_dict.items():
+        # 获取该属性的所有聚类中心
+        center_indices = clusters[0]
+        
+        # 为每个聚类中心找到其标签
+        center_labels = {}
+        for idx, value, label in index_value_label_dict.get(attr, []):
+            if idx in center_indices:
+                center_labels[idx] = label
+        
+        # 对每个聚类中心，在其聚类内扩散标签
+        for center_idx, center_label in center_labels.items():
+            # 找到该中心所在的聚类
+            target_cluster = None
+            for i in range(1, len(clusters)):
+                if center_idx in clusters[i]:
+                    target_cluster = clusters[i]
                     break
-            temp_label = -1
-            for triple_set in center_index_value_label_dict[key]:
-                if triple_set[0] == center_index:
-                    temp_label = triple_set[2]
-                    break
-            if temp_label == 0:
-                for index in temp_cluster:
-                    det_right_list.append((index, key))
-            elif temp_label == 1:
-                for index in temp_cluster:
-                    det_wrong_list.append((index, key))
+            
+            # 如果找到了聚类且该聚类没有被完全标注，则扩散标签
+            if target_cluster is not None:
+                # 检查该聚类是否已经被完全标注
+                cluster_fully_labeled = True
+                for idx in target_cluster:
+                    is_labeled = False
+                    for labeled_idx, _, _ in index_value_label_dict.get(attr, []):
+                        if labeled_idx == idx:
+                            is_labeled = True
+                            break
+                    if not is_labeled:
+                        cluster_fully_labeled = False
+                        break
+                
+                # 如果聚类没有被完全标注，则扩散标签
+                if not cluster_fully_labeled:
+                    for idx in target_cluster:
+                        # 检查该索引是否已经被标注
+                        is_labeled = False
+                        for labeled_idx, _, _ in index_value_label_dict.get(attr, []):
+                            if labeled_idx == idx:
+                                is_labeled = True
+                                break
+                        
+                        # 如果没有被标注，则添加到相应的列表
+                        if not is_labeled:
+                            if center_label == 1:
+                                det_wrong_list.append((idx, attr))
+                            elif center_label == 0:
+                                det_right_list.append((idx, attr))
+    
     return det_wrong_list, det_right_list
 
 
@@ -1161,25 +1514,91 @@ if __name__ == "__main__":
             with Timer('Constructing Guidelines', logger, time_file) as t:
                 guide_content = process_guidlines(GUIDE_USE, GUIDE_READ, dataset, read_path, read_guide_path, resp_path, dirty_csv, all_attrs, guide_directory, cluster_index_dict, distri_analy_content)
             total_time += t.duration
-            
-            with Timer('LLM Labeling', logger, time_file) as t:
-                process_error_checking(ERROR_CHECKING_READ, read_error_checking_path, all_attrs, error_checking_res_directory)
-            total_time += t.duration
-            
-            center_index_value_label_dict = {}
-            with Timer('Extract Labeling Results', logger, time_file) as t:
-                center_index_value_label_dict = extract_llm_label_res(all_attrs, error_checking_res_directory, cluster_index_dict, center_value_dict)
-            total_time += t.duration
-            
-            measure_status = 'Not Done'
-            with Timer('Evaluating LLM Labeling', logger, time_file) as t:
-                measure_status = measure_llm_label(resp_path, clean_csv, all_attrs, related_attrs_dict, gt_wrong_dict, center_index_value_label_dict)
-            total_time += t.duration
-            
-            para_file.write(f"LLM labeled value number: {sum(len(value) for value in cluster_index_dict.values())}\n")
+            iterations = 5
+            # 初始化labeled_number为0
+            labeled_number = 0
+            # 初始化index_value_label_dict
+            index_value_label_dict = defaultdict(list)
+            for i in range(iterations):
+                indices_dict = {}
+                
+                # 准备indices字典
+                if i == 0:
+                    # 第一次迭代使用聚类中心indices
+                    indices_dict = {attr: cluster_index_dict[attr][0] for attr in all_attrs}
+                else:
+                    # 后续迭代使用最优聚类indices
+                    indices_dict = {attr: optimal_cluster_result[attr]['cluster_indices'] for attr in all_attrs if attr in optimal_cluster_result}
+                
+                # 计算当前迭代的实际标注数量（过滤掉已标注的索引后）
+                unlabeled_indices_dict = {}
+                current_labeled_number = 0
+                
+                for attr_name, indices in indices_dict.items():
+                    # 获取该属性的未标注索引
+                    if index_value_label_dict and attr_name in index_value_label_dict:
+                        labeled_indices = {idx for idx, _, _ in index_value_label_dict[attr_name]}
+                        unlabeled_indices = [idx for idx in indices if idx not in labeled_indices]
+                    else:
+                        unlabeled_indices = indices[:]
+                    
+                    # 限制标注数量：超过30个随机抽取30个，否则全部标注
+                    if len(unlabeled_indices) > 30:
+                        unlabeled_indices = random.sample(list(unlabeled_indices), 30)
+                    
+                    unlabeled_indices_dict[attr_name] = unlabeled_indices
+                    current_labeled_number += len(unlabeled_indices)
+                
+                labeled_number += current_labeled_number
+                
+                with Timer('LLM Labeling', logger, time_file) as t:
+                    if ERROR_CHECKING_READ:
+                        process_error_checking(ERROR_CHECKING_READ, read_error_checking_path, all_attrs, error_checking_res_directory)
+                    else:
+                        # 使用未标注的索引进行标注
+                        for attr_name, unlabeled_indices in unlabeled_indices_dict.items():
+                            if unlabeled_indices:  # 只有当有未标注的索引时才进行标注
+                                task_det_initial(attr_name, error_checking_res_directory, unlabeled_indices)
+                total_time += t.duration
+                
+                with Timer('Extract Labeling Results', logger, time_file) as t:
+                    # 使用相同的indices字典提取标注结果
+                    current_index_value_label_dict = extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict)
+                    if i == 0:
+                        center_index_value_label_dict = current_index_value_label_dict
+                total_time += t.duration
+                
+                # 将当前迭代的标注结果累积到总结果中
+                for attr, label_list in current_index_value_label_dict.items():
+                    # 创建一个集合来跟踪已经添加的索引，避免重复
+                    existing_indices = {idx for idx, _, _ in index_value_label_dict[attr]}
+                    for idx, value, label in label_list:
+                        # 只有当索引不存在时才添加
+                        if idx not in existing_indices:
+                            index_value_label_dict[attr].append((idx, value, label))
+                            existing_indices.add(idx)
+                
+                measure_status = 'Not Done'
+                with Timer('Evaluating LLM Labeling', logger, time_file) as t:
+                    measure_status = measure_llm_label(resp_path, clean_csv, all_attrs, related_attrs_dict, gt_wrong_dict, index_value_label_dict)
+                total_time += t.duration
+
+                # 如果是第一次迭代，初始化enhanced_gen_dict
+                if i == 0:
+                    enhanced_gen_dict = defaultdict(default_dict_of_lists)
+                with Timer('Generating Enhanced Data', logger, time_file) as t:
+                    process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ,  read_enhanced_path, enhanced_gen_directory, dirty_csv, all_attrs, related_attrs_dict, current_index_value_label_dict, enhanced_gen_dict, 20, logger)
+                total_time += t.duration
+                if (i != iterations-1):
+                    with Timer('Select Optimal Cluster', logger, time_file) as t:
+                        optimal_cluster_result = process_select_optimal_cluster(enhanced_gen_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict, pre_funcs_for_attr, feature_all_dict, resp_path, logger, index_value_label_dict, residual_method='both')
+                    total_time += t.duration
+
+
+            para_file.write(f"LLM labeled value number: {labeled_number}\n")
             det_wrong_list, det_right_list = [], []
             with Timer('Label Propagation', logger, time_file) as t:
-                det_wrong_list, det_right_list = label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, center_index_value_label_dict)
+                det_wrong_list, det_right_list = label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, index_value_label_dict)
             total_time += t.duration
             
             err_gen_dict, funcs_for_attr = {}, {}
@@ -1187,84 +1606,6 @@ if __name__ == "__main__":
                 err_gen_dict, funcs_for_attr = process_gen_err_funcs(FUNC_USE, FUNC_READ, read_path, read_func_path, read_error_path, resp_path, funcs_directory, dirty_csv, all_attrs, para_file, related_attrs_dict, center_index_value_label_dict, det_wrong_list, det_right_list)
             total_time += t.duration
 
-            enhanced_gen_dict = defaultdict(default_dict_of_lists)
-            with Timer('Generating Enhanced Data', logger, time_file) as t:
-                process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ,  read_enhanced_path, enhanced_gen_directory, dirty_csv, all_attrs, related_attrs_dict, center_index_value_label_dict, enhanced_gen_dict, 10, logger)
-            total_time += t.duration
-
-            err_gen_dict = defaultdict(default_dict_of_lists)
-            with Timer('Generating Error Data', logger, time_file) as t:
-                process_gen_err_data(ERR_GEN_USE, ERR_GEN_READ, read_err_gen_path, err_gen_directory, dirty_csv, all_attrs, related_attrs_dict, center_index_value_label_dict, err_gen_dict, logger)
-            total_time += t.duration
-            
-            func_num = 0
-            for attr in all_attrs:
-                func_num += len(funcs_for_attr[attr]['clean'])
-            para_file.write(f"ori_func_num:{func_num}\n")
-            llm_label_vals_dict = defaultdict(lambda: defaultdict(list))
-
-            init_det_right_dict = defaultdict(list)
-            init_det_wrong_dict = defaultdict(list)
-            for idx, attr in det_right_list:
-                related_attrs = list(related_attrs_dict[attr])
-                init_det_right_dict[attr].append((idx, dirty_csv.loc[idx, [attr]+related_attrs].to_dict()))
-            for idx, attr in det_wrong_list:
-                related_attrs = list(related_attrs_dict[attr])
-                init_det_wrong_dict[attr].append((idx, dirty_csv.loc[idx, [attr]+related_attrs].to_dict()))
-                
-            for attr in all_attrs:
-                related_attrs = list(related_attrs_dict[attr])
-                wrong_val_values = []
-                right_val_values = []
-                for index, value, label in center_index_value_label_dict[attr]:
-                    if label == 1:
-                        wrong_val_values.append(dirty_csv.loc[index, [attr]+related_attrs].to_dict())
-                    elif label == 0:
-                        right_val_values.append(dirty_csv.loc[index, [attr]+related_attrs].to_dict())
-                llm_label_vals_dict[attr]['wrong_val_values'].extend(list(wrong_val_values))
-                llm_label_vals_dict[attr]['right_val_values'].extend(list(right_val_values))
-
-            # use init_det_right_dict to filter funcs_for_attr
-            for attr in all_attrs:
-                for func in funcs_for_attr[attr]['clean']:
-                    pass_num = 0
-                    if len(init_det_right_dict[attr]) == 0:
-                        continue
-                    for val in init_det_right_dict[attr]:
-                        if handle_func_exec(func, val[1], attr) == 1:
-                            pass_num += 1
-                    if float(pass_num / len(init_det_right_dict[attr])) < 0.5:
-                        funcs_for_attr[attr]['clean'].remove(func)
-            
-            # use filtered funcs_for_attr to filter all det_right_list, with pass_num < 0.5
-            for attr in all_attrs:
-                for val in init_det_right_dict[attr]:
-                    flag = 0
-                    pass_num = 0
-                    for func in funcs_for_attr[attr]['clean']:
-                        if handle_func_exec(func, val[1], attr) == 1:
-                            pass_num += 1
-                    if float(pass_num / (len(funcs_for_attr[attr]['clean'])+1e-6)) < 0.5:
-                        det_right_list.remove((val[0], attr))
-
-            for attr in all_attrs:
-                temp_func_list = []
-                val_num = len(llm_label_vals_dict[attr]['right_val_values'])
-                if val_num == 0:
-                    continue
-                for func in funcs_for_attr[attr]['clean']:
-                    pass_num = 0
-                    for val in llm_label_vals_dict[attr]['right_val_values']:
-                        if handle_func_exec(func, val, attr) == 1:
-                            pass_num += 1
-                    if float(pass_num / val_num) >= FUNC_VAL_THRESHOLD:
-                        temp_func_list.append(func)
-                funcs_for_attr[attr]['clean'] = temp_func_list
-            func_num = 0
-            for attr in all_attrs:
-                func_num += len(funcs_for_attr[attr]['clean'])
-            para_file.write(f"after_right_val:{func_num}\n")
-            
             feature_all_dict = None
             if os.path.exists(os.path.join(resp_path, f'cluster_feat_dict.pkl')):
                 with open(os.path.join(resp_path, f'cluster_feat_dict.pkl'), 'rb') as f:
@@ -1277,7 +1618,7 @@ if __name__ == "__main__":
             feat_dict_train = {}
             label_dict_train = {}
             for attr in all_attrs:
-                attr, feature_list, label_list = process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, err_gen_dict, enhanced_gen_dict,funcs_for_attr, feature_all_dict, resp_path)
+                attr, feature_list, label_list = process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, enhanced_gen_dict, funcs_for_attr, feature_all_dict, resp_path)
                 feat_dict_train[attr] = feature_list
                 label_dict_train[attr] = label_list
             

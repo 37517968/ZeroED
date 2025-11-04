@@ -269,6 +269,104 @@ def feat_gen(dataset, col_num, col_name, related_attrs_dict, pre_funcs_for_attr,
     return np.array(feature_list), feature_all_dict
 
 
+def feat_gen_df(dirty_csv, col_num, col_name, related_attrs_dict, pre_funcs_for_attr, resp_path):
+    """
+    基于feat_gen方法改造，接受DataFrame作为输入，生成对应的特征
+    注意：dirty_csv已经是只包含相关属性的数据，不需要再处理相关属性
+    
+    Args:
+        dirty_csv: 输入的DataFrame数据（已包含相关属性）
+        col_num: 列索引
+        col_name: 列名
+        related_attrs_dict: 相关属性字典（保留参数以保持接口一致）
+        pre_funcs_for_attr: 预处理函数字典
+        resp_path: 响应路径
+    
+    Returns:
+        feature_list: 特征列表
+        feature_all_dict: 特征字典
+    """
+    # 确保输入数据是字符串类型并填充空值
+    dirty_csv = dirty_csv.astype(str).fillna('nan')
+    all_attrs = list(dirty_csv.columns)
+    
+    # 计算属性值对和共现字典
+    # 创建临时CSV文件以复用count_attribute_value_pairs函数
+    temp_csv_path = './temp_dirty_csv.csv'
+    dirty_csv.to_csv(temp_csv_path, index=False)
+    _, co_occur_dict = count_attribute_value_pairs(temp_csv_path)
+    
+    cell_pat_dict = {}
+    cell_pat_stats = {attr: {} for attr in all_attrs}
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(tqdm(executor.map(process_row, range(len(dirty_csv)),
+                                         [dirty_csv]*len(dirty_csv),
+                                         [all_attrs]*len(dirty_csv),
+                                         [col_num]*len(dirty_csv)
+                                         ),
+                            total=len(dirty_csv), ncols=90,
+                            desc="[Generating patterns for each cell]"))
+
+    for row_pat_dict, row_pat_stats in results:
+        cell_pat_dict.update(row_pat_dict)
+        for attr, pat_dict in row_pat_stats.items():
+            for pat, count in pat_dict.items():
+                if pat not in cell_pat_stats[attr]:
+                    cell_pat_stats[attr][pat] = 0
+                cell_pat_stats[attr][pat] += count
+
+    # get fasttext_list
+    model = fasttext.load_model('./cc.en.300.bin')
+    fasttext_dimension = len(all_attrs)
+    fasttext.util.reduce_model(model, fasttext_dimension)
+    fasttext_list = {}
+    pre_funcs_feat = {}
+    for row in tqdm(range(len(dirty_csv)), ncols=90, desc="[Generating fasttext_vector for each cell]"):
+        if row not in fasttext_list:
+            fasttext_list[row] = {}
+        if row not in pre_funcs_feat:
+            pre_funcs_feat[row] = {}
+            
+        # 获取当前列的fasttext向量
+        fasttext_vector = model.get_word_vector(str(dirty_csv.iloc[row, col_num]))
+        fasttext_list[row][col_num] = fasttext_vector
+        
+        # 处理预处理函数特征
+        if len(pre_funcs_for_attr) > 0 and col_name in pre_funcs_for_attr:
+            # 直接使用当前行所有列的数据作为输入，因为dirty_csv已经包含相关属性
+            row_val = [dirty_csv.loc[row].to_dict()]
+            pre_funcs_feat_temp = np.array([handle_func_exec(func, row_val[0], col_name) for func in pre_funcs_for_attr[col_name]['clean']])
+            pre_funcs_feat[row][col_num] = pre_funcs_feat_temp
+        else:
+            pre_funcs_feat[row][col_num] = np.array([])
+            
+        # 添加其他列的fasttext向量
+        for i in range(len(all_attrs)):
+            if i != col_num:  # 跳过当前列
+                rel_attr_vec = model.get_word_vector(str(dirty_csv.iloc[row, i]))
+                fasttext_list[row][col_num] = np.append(fasttext_list[row][col_num], rel_attr_vec)
+
+
+    feature_list = []
+    feature_all_dict = defaultdict(default_dict_of_lists)
+    for row in tqdm(range(len(dirty_csv)), ncols=90, desc="Formulating Features: "):
+        feature, feat_single_dict_tmp = feat_gen_single(dirty_csv, co_occur_dict, cell_pat_dict, cell_pat_stats, fasttext_list, pre_funcs_feat, row, col_num,
+                                    dirty_csv.iloc[row, col_num], resp_path)
+        feature_list.append(feature)
+        feature_all_dict.update(feat_single_dict_tmp)
+    scaler = MinMaxScaler()
+    feature_list = scaler.fit_transform(np.array(feature_list))
+    # feature_dict[col] = np.array(feature_list)
+    
+    # 删除临时文件
+    import os
+    if os.path.exists(temp_csv_path):
+        os.remove(temp_csv_path)
+    
+    return np.array(feature_list), feature_all_dict
+
+
 def cluster(dataset, cluster_method, n_method, col_num, related_attrs_dict, pre_funcs_for_attr, resp_path):
     base_dir = '.'
     err_rate = '01'
