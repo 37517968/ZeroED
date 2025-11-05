@@ -292,21 +292,23 @@ def feat_gen_df(dirty_csv, col_num, col_name, related_attrs_dict, pre_funcs_for_
     
     # 计算属性值对和共现字典
     # 创建临时CSV文件以复用count_attribute_value_pairs函数
-    temp_csv_path = './temp_dirty_csv.csv'
+    # 使用线程ID和时间戳创建唯一的临时文件名，避免多线程冲突
+    import threading
+    import time
+    thread_id = threading.get_ident()
+    timestamp = int(time.time() * 1000)  # 毫秒级时间戳
+    temp_csv_path = f'./temp_dirty_csv_{thread_id}_{timestamp}.csv'
     dirty_csv.to_csv(temp_csv_path, index=False)
     _, co_occur_dict = count_attribute_value_pairs(temp_csv_path)
     
     cell_pat_dict = {}
     cell_pat_stats = {attr: {} for attr in all_attrs}
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = list(tqdm(executor.map(process_row, range(len(dirty_csv)),
-                                         [dirty_csv]*len(dirty_csv),
-                                         [all_attrs]*len(dirty_csv),
-                                         [col_num]*len(dirty_csv)
-                                         ),
-                            total=len(dirty_csv), ncols=90,
-                            desc="[Generating patterns for each cell]"))
+    # 改为单线程处理，避免多线程导致的性能问题和卡死
+    results = []
+    for row in tqdm(range(len(dirty_csv)), ncols=90, desc="[Generating patterns for each cell]"):
+        result = process_row(row, dirty_csv, all_attrs, col_num)
+        results.append(result)
 
     for row_pat_dict, row_pat_stats in results:
         cell_pat_dict.update(row_pat_dict)
@@ -335,8 +337,8 @@ def feat_gen_df(dirty_csv, col_num, col_name, related_attrs_dict, pre_funcs_for_
         # 处理预处理函数特征
         if len(pre_funcs_for_attr) > 0 and col_name in pre_funcs_for_attr:
             # 直接使用当前行所有列的数据作为输入，因为dirty_csv已经包含相关属性
-            row_val = [dirty_csv.loc[row].to_dict()]
-            pre_funcs_feat_temp = np.array([handle_func_exec(func, row_val[0], col_name) for func in pre_funcs_for_attr[col_name]['clean']])
+            row_val = dirty_csv.loc[row].to_dict()
+            pre_funcs_feat_temp = np.array([handle_func_exec(func, row_val, col_name) for func in pre_funcs_for_attr[col_name]['clean']])
             pre_funcs_feat[row][col_num] = pre_funcs_feat_temp
         else:
             pre_funcs_feat[row][col_num] = np.array([])

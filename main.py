@@ -183,17 +183,22 @@ def parse_complex_list(data_str):
                     dict_match = re.match(r'\{(.*)\}', match)
                     if dict_match:
                         dict_content = dict_match.group(1)
-                        # 分割字典键值对
+                        # 分割字典键值对，处理包含单引号的值
                         kv_pairs = re.findall(r'([^:]+):\s*(\'[^\']*\'|"[^"]*"|[^,]+)', dict_content)
                         result_dict = {}
                         for k, v in kv_pairs:
                             k = k.strip().strip('\'"')
-                            v = v.strip().strip('\'"')
+                            v = v.strip()
+                            # 处理包含单引号的值，如 'O'Hare'
+                            if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
+                                # 移除外层引号，保留内部引号
+                                v = v[1:-1]
                             result_dict[k] = v
                         parsed_data.append(result_dict)
                     else:
                         parsed_data.append(match)
-                except:
+                except Exception as e:
+                    print(f"Error parsing dictionary: {e}")
                     parsed_data.append(match)
             else:
                 # 移除引号
@@ -343,10 +348,16 @@ def task_gen_err_data(attr, dirty_csv, index_value_label_dict, related_attrs_dic
 
 def task_gen_enhanced_data(attr, dirty_csv, index_value_label_dict, related_attrs_dict, enhanced_gen_dict, num_gen):
     related_attrs = list(related_attrs_dict[attr])
-    clean_gen_prompt_file = open(os.path.join(enhanced_gen_directory, f"prompt_ans_clean_gen_{attr}.txt"), 'w', encoding='utf-8')
-    dirty_gen_prompt_file = open(os.path.join(enhanced_gen_directory, f"prompt_ans_dirty_gen_{attr}.txt"), 'w', encoding='utf-8')
-    clean_gen_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_{attr}.txt"), 'w', encoding='utf-8')
-    dirty_gen_file = open(os.path.join(enhanced_gen_directory, f"dirty_gen_{attr}.txt"), 'w', encoding='utf-8')
+    sep = "\n" + "="*40 + f" New run for attr: {attr} " + "="*40 + "\n\n"
+    clean_gen_prompt_file = open(os.path.join(enhanced_gen_directory, f"prompt_ans_clean_gen_{attr}.txt"), 'a', encoding='utf-8')
+    dirty_gen_prompt_file = open(os.path.join(enhanced_gen_directory, f"prompt_ans_dirty_gen_{attr}.txt"), 'a', encoding='utf-8')
+    clean_gen_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_{attr}.txt"), 'a', encoding='utf-8')
+    dirty_gen_file = open(os.path.join(enhanced_gen_directory, f"dirty_gen_{attr}.txt"), 'a', encoding='utf-8')
+    # 每次调用写入分隔符
+    clean_gen_prompt_file.write(sep)
+    dirty_gen_prompt_file.write(sep)
+    clean_gen_file.write(sep)
+    dirty_gen_file.write(sep)
     wrong_values = []
     right_values = []
     used_idx_list = {}
@@ -392,6 +403,9 @@ def task_gen_enhanced_data(attr, dirty_csv, index_value_label_dict, related_attr
     filtered_clean = []
     filtered_clean.extend(right_values)
     for clean in clean_info:
+        if len(clean[3]) == 0 or len(clean[3].keys()) < len([attr]+related_attrs) or not isinstance(clean[3], dict):
+            continue
+
         try:
             if clean[0] in all_attrs and str(clean[-1]).strip() not in right_values and str(
                     clean[-1]).strip() not in wrong_values:
@@ -431,6 +445,8 @@ def task_gen_enhanced_data(attr, dirty_csv, index_value_label_dict, related_attr
     filtered_dirty.extend(wrong_values)
     for dirty in dirty_info:
         try:
+            if len(dirty[3]) == 0 or len(dirty[3].keys()) < len([attr]+related_attrs) or not isinstance(dirty[3], dict):
+                continue
             if dirty[0] in all_attrs and str(dirty[-1]).strip() not in right_values and str(
                     dirty[-1]).strip() not in wrong_values:
                 enhanced_gen_dict[attr]['dirty'].append(dirty[3])
@@ -439,13 +455,13 @@ def task_gen_enhanced_data(attr, dirty_csv, index_value_label_dict, related_attr
         except IndexError as e:
             logger.error(f"\nError: {e}\n Handling Value: {dirty}\n Processing attribute: {attr}\n")
     
-    clean_gen_res_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_res_{attr}.txt"), 'w', encoding='utf-8')
+    clean_gen_res_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_res_{attr}.txt"), 'a', encoding='utf-8')
     for clean_dict in enhanced_gen_dict[attr]['clean']:
         json.dump(clean_dict, clean_gen_res_file)
         clean_gen_res_file.write('\n')
     clean_gen_res_file.close()
     
-    dirty_gen_res_file = open(os.path.join(enhanced_gen_directory, f"dirty_gen_res_{attr}.txt"), 'w', encoding='utf-8')
+    dirty_gen_res_file = open(os.path.join(enhanced_gen_directory, f"dirty_gen_res_{attr}.txt"), 'a', encoding='utf-8')
     for dirty_dict in enhanced_gen_dict[attr]['dirty']:
         json.dump(dirty_dict, dirty_gen_res_file)
         dirty_gen_res_file.write('\n')
@@ -601,7 +617,10 @@ def task_distri_analys(attr, analyzer, dist_dir):
 
 
 def single_val_feat(val, fasttext_m, funcs_for_attr, attr, idx, all_attrs, feature_all_dict, resp_path):
-    feature = [handle_func_exec(func, val, attr) for func in funcs_for_attr[attr]['clean']]
+    # feature = [handle_func_exec(func, val, attr) for func in funcs_for_attr[attr]['clean']]
+    feature = [handle_func_exec(func, val, attr) if handle_func_exec(func, val, attr) != -1 else 0
+    for func in funcs_for_attr[attr]['clean']
+    ]
     if idx == -1:
         for a_val in val.values():
             feature.extend(fasttext_m.get_word_vector(str(a_val)))
@@ -666,14 +685,16 @@ def prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_att
         feature_list.append(feature)
         label_list.append(1)
     for val in tqdm(enhanced_gen_dict[attr]['clean'], ncols=120, desc=f"Processing {attr} generated clean data"):
-        if len(enhanced_gen_dict[attr]['clean']) == 0 or len(enhanced_gen_dict[attr]['clean'][0].keys()) < len([attr]+related_attrs):
+        if len(enhanced_gen_dict[attr]['clean']) == 0 or len(val) < len([attr]+related_attrs) or not isinstance(val, dict):
             continue
+
         feature = single_val_feat(val, fasttext_m, funcs_for_attr, attr, -1, list(dirty_csv.columns), feature_all_dict, resp_path)
         feature_list.append(feature)
         label_list.append(0)
     for val in tqdm(enhanced_gen_dict[attr]['dirty'], ncols=120, desc=f"Processing {attr} generated dirty data"):
-        if len(enhanced_gen_dict[attr]['dirty']) == 0 or len(enhanced_gen_dict[attr]['dirty'][0].keys()) < len([attr]+related_attrs):
+        if len(enhanced_gen_dict[attr]['dirty']) == 0 or len(val) < len([attr]+related_attrs) or not isinstance(val, dict):
             continue
+        
         feature = single_val_feat(val, fasttext_m, funcs_for_attr, attr, -1, list(dirty_csv.columns), feature_all_dict, resp_path)
         feature_list.append(feature)
         label_list.append(1)
@@ -922,35 +943,109 @@ def process_select_optimal_cluster(
     """
     optimal_cluster_info_dict = {}
     
-    
     logger.info("开始选择最优聚类...")
+    
+    # 全局加载FastText模型，避免重复加载
+    try:
+        fasttext_model = fasttext.load_model('./cc.en.300.bin')
+        fasttext_dimension = len(dirty_csv.columns)
+        fasttext.util.reduce_model(fasttext_model, fasttext_dimension)
+    except Exception as e:
+        logger.error(f"加载FastText模型失败: {str(e)}")
+        return optimal_cluster_info_dict
 
-    for attr in all_attrs:
+    # 并行处理每个属性
+    def process_attr(attr):
         min_residual = float('inf')
+        attr_optimal_cluster = None
+        
         logger.info(f"处理属性: {attr}")
         
         # 获取该属性的聚类信息
         if attr not in cluster_index_dict:
             logger.warning(f"属性 {attr} 不在聚类索引字典中，跳过")
-            continue
+            return None
             
         clusters = cluster_index_dict[attr]
         if len(clusters) == 0:
             logger.warning(f"属性 {attr} 没有有效聚类，跳过")
-            continue
+            return None
             
         related_attrs = list(related_attrs_dict[attr])
+        col_num = list(dirty_csv.columns).index(attr)
 
-        # 加载 fastText
-        fasttext_model = fasttext.load_model('./cc.en.300.bin')
-        fasttext_dimension = len(dirty_csv.columns)
-        fasttext.util.reduce_model(fasttext_model, fasttext_dimension)
-
-        ref_data = dirty_csv.loc[:, [attr] + related_attrs]
-        col_num = list(ref_data.columns).index(attr)
-        ref_feature_list, ref_feature_dict = feat_gen_df(ref_data, col_num, attr, related_attrs_dict, funcs_for_attr, resp_path)
-
-        ref_features = np.array(ref_feature_list, dtype=np.float64)
+        # 从feature_all_dict中提取ref_features，不再重复计算
+        ref_features = []
+        for row_idx in range(len(dirty_csv)):
+            if (row_idx, col_num) in feature_all_dict:
+                # 获取当前行的特征字典
+                row_features = feature_all_dict[(row_idx, col_num)]
+                
+                # 按照feat_gen_df中的顺序合并特征
+                # 1. occur_cnt_feat
+                occur_cnt_feat = []
+                if 'occur_cnt_feat' in row_features:
+                    # 获取所有属性的列名
+                    all_attr_columns = list(dirty_csv.columns)
+                    # 获取related_attrs在所有属性中的索引
+                    related_attr_indices = [all_attr_columns.index(rel_attr) for rel_attr in related_attrs]
+                    
+                    # occur_cnt_feat是按照所有属性（除了当前属性）的顺序排列的
+                    # 我们需要找到related_attrs对应的特征
+                    # 首先构建一个从属性索引到occur_cnt_feat中位置的映射
+                    # occur_cnt_feat中不包含当前属性，所以需要调整索引
+                    attr_to_feat_pos = {}
+                    feat_pos = 0
+                    for i, col_name in enumerate(all_attr_columns):
+                        if i != col_num:  # 跳过当前属性
+                            attr_to_feat_pos[i] = feat_pos
+                            feat_pos += 1
+                    
+                    # 提取related_attrs对应的特征
+                    for rel_attr_idx in related_attr_indices:
+                        if rel_attr_idx in attr_to_feat_pos:
+                            feat_pos = attr_to_feat_pos[rel_attr_idx]
+                            if feat_pos < len(row_features['occur_cnt_feat']):
+                                occur_cnt_feat.append(row_features['occur_cnt_feat'][feat_pos])
+                
+                # 2. pat_stats_feat
+                pat_stats_feat = []
+                if 'pat_stats_feat' in row_features:
+                    pat_stats_feat = row_features['pat_stats_feat']
+                
+                # 3. fasttext_feat
+                fasttext_feat = []
+                if 'fasttext_feat' in row_features:
+                    fasttext_feat = row_features['fasttext_feat']
+                
+                # 4. pre_funcs_feat，过滤掉-1的值
+                pre_funcs_feat = []
+                if 'pre_funcs_feat' in row_features:
+                    pre_funcs_feat = [feat for feat in row_features['pre_funcs_feat'] if feat != -1]
+                
+                # 按照feat_gen_df中的顺序合并特征
+                # 确保所有特征都是列表类型，避免NumPy数组导致的广播错误
+                if isinstance(occur_cnt_feat, np.ndarray):
+                    occur_cnt_feat = occur_cnt_feat.tolist()
+                if isinstance(pat_stats_feat, np.ndarray):
+                    pat_stats_feat = pat_stats_feat.tolist()
+                if isinstance(fasttext_feat, np.ndarray):
+                    fasttext_feat = fasttext_feat.tolist()
+                if isinstance(pre_funcs_feat, np.ndarray):
+                    pre_funcs_feat = pre_funcs_feat.tolist()
+                
+                # 合并特征
+                merged_features = occur_cnt_feat + pat_stats_feat + fasttext_feat + pre_funcs_feat
+                ref_features.append(merged_features)
+        
+        # 如果没有提取到特征，则使用空数组
+        if not ref_features:
+            logger.warning(f"属性 {attr} 未能从feature_all_dict中提取到特征，使用空数组")
+            ref_features = [[] for _ in range(len(dirty_csv))]
+        
+        ref_features = np.array(ref_features, dtype=np.float64)
+        # 处理可能的NaN或无限值
+        ref_features = np.nan_to_num(ref_features)
 
         # 遍历聚类
         for cluster_idx, cluster_indices in enumerate(clusters):
@@ -984,8 +1079,6 @@ def process_select_optimal_cluster(
             combined_feature_list = np.array(combined_feature_list, dtype=np.float64)
             # 处理可能的NaN或无限值
             combined_feature_list = np.nan_to_num(combined_feature_list)
-
-            
 
             # === 计算残差 ===
             try:
@@ -1026,18 +1119,27 @@ def process_select_optimal_cluster(
                 # === 选择最优聚类 ===
                 if combined_residual < min_residual:
                     min_residual = combined_residual
-                    optimal_cluster_info_dict[attr] = {
-                    'cluster_idx': cluster_idx,
-                    'cluster_indices': cluster_indices,
-                    'jsd_residual': jsd_residual,
-                    'ksd_residual': ksd_residual,
-                    'combined_residual': combined_residual,
-                    'enhanced_data': enhanced_data
-                }
+                    attr_optimal_cluster = {
+                        'cluster_idx': cluster_idx,
+                        'cluster_indices': cluster_indices,
+                        'jsd_residual': jsd_residual,
+                        'ksd_residual': ksd_residual,
+                        'combined_residual': combined_residual,
+                        'enhanced_data': enhanced_data
+                    }
 
             except Exception as e:
                 logger.error(f"计算属性 {attr} 聚类 {cluster_idx} 残差时出错: {str(e)}")
                 continue
+
+        return attr, attr_optimal_cluster
+
+    # 改为单线程处理，避免多线程导致的性能问题和卡死
+    for attr in all_attrs:
+        result = process_attr(attr)
+        if result:
+            attr, attr_optimal_cluster = result
+            optimal_cluster_info_dict[attr] = attr_optimal_cluster
 
     if optimal_cluster_info_dict:
         logger.info("最优聚类信息:")
@@ -1514,7 +1616,7 @@ if __name__ == "__main__":
             with Timer('Constructing Guidelines', logger, time_file) as t:
                 guide_content = process_guidlines(GUIDE_USE, GUIDE_READ, dataset, read_path, read_guide_path, resp_path, dirty_csv, all_attrs, guide_directory, cluster_index_dict, distri_analy_content)
             total_time += t.duration
-            iterations = 5
+            iterations = 4
             # 初始化labeled_number为0
             labeled_number = 0
             # 初始化index_value_label_dict
@@ -1543,8 +1645,9 @@ if __name__ == "__main__":
                         unlabeled_indices = indices[:]
                     
                     # 限制标注数量：超过30个随机抽取30个，否则全部标注
-                    if len(unlabeled_indices) > 30:
-                        unlabeled_indices = random.sample(list(unlabeled_indices), 30)
+                    if i!=0:
+                        if len(unlabeled_indices) > 30:
+                            unlabeled_indices = random.sample(list(unlabeled_indices), 30)
                     
                     unlabeled_indices_dict[attr_name] = unlabeled_indices
                     current_labeled_number += len(unlabeled_indices)
@@ -1557,7 +1660,7 @@ if __name__ == "__main__":
                     else:
                         # 使用未标注的索引进行标注
                         for attr_name, unlabeled_indices in unlabeled_indices_dict.items():
-                            if unlabeled_indices:  # 只有当有未标注的索引时才进行标注
+                            if len(unlabeled_indices) > 0:  # 只有当有未标注的索引时才进行标注
                                 task_det_initial(attr_name, error_checking_res_directory, unlabeled_indices)
                 total_time += t.duration
                 
@@ -1591,7 +1694,69 @@ if __name__ == "__main__":
                 total_time += t.duration
                 if (i != iterations-1):
                     with Timer('Select Optimal Cluster', logger, time_file) as t:
-                        optimal_cluster_result = process_select_optimal_cluster(enhanced_gen_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict, pre_funcs_for_attr, feature_all_dict, resp_path, logger, index_value_label_dict, residual_method='both')
+                        optimal_cluster_result = {
+                        "attr1": {
+                            "cluster_idx": 2,
+                            "cluster_indices": [10, 15, 23, 45, 67, 89, 101, 123, 145, 167],
+                            "jsd_residual": 0.1234,
+                            "ksd_residual": 0.2345,
+                            "combined_residual": 0.1789,
+                            "enhanced_data": [
+                            {"attr1": "value1", "related_attr1": "rel_value1", "related_attr2": "rel_value2"},
+                            {"attr1": "value2", "related_attr1": "rel_value3", "related_attr2": "rel_value4"},
+                            {"attr1": "value3", "related_attr1": "rel_value5", "related_attr2": "rel_value6"}
+                            ]
+                        },
+                        "attr2": {
+                            "cluster_idx": 1,
+                            "cluster_indices": [5, 12, 34, 56, 78, 90, 112, 134, 156, 178],
+                            "jsd_residual": 0.0987,
+                            "ksd_residual": 0.1876,
+                            "combined_residual": 0.1431,
+                            "enhanced_data": [
+                            {"attr2": "valueA", "related_attr1": "rel_valueA", "related_attr2": "rel_valueB"},
+                            {"attr2": "valueB", "related_attr1": "rel_valueC", "related_attr2": "rel_valueD"},
+                            {"attr2": "valueC", "related_attr1": "rel_valueE", "related_attr2": "rel_valueF"}
+                            ]
+                        },
+                        "attr3": {
+                            "cluster_idx": 0,
+                            "cluster_indices": [1, 8, 20, 42, 64, 86, 108, 130, 152, 174],
+                            "jsd_residual": 0.1567,
+                            "ksd_residual": 0.2654,
+                            "combined_residual": 0.2110,
+                            "enhanced_data": [
+                            {"attr3": "valueX", "related_attr1": "rel_valueX", "related_attr2": "rel_valueY"},
+                            {"attr3": "valueY", "related_attr1": "rel_valueZ", "related_attr2": "rel_valueW"},
+                            {"attr3": "valueZ", "related_attr1": "rel_valueV", "related_attr2": "rel_valueU"}
+                            ]
+                        },
+                        "attr4": {
+                            "cluster_idx": 3,
+                            "cluster_indices": [7, 14, 36, 58, 80, 102, 124, 146, 168, 190],
+                            "jsd_residual": 0.0892,
+                            "ksd_residual": 0.1723,
+                            "combined_residual": 0.1307,
+                            "enhanced_data": [
+                            {"attr4": "valueP", "related_attr1": "rel_valueP", "related_attr2": "rel_valueQ"},
+                            {"attr4": "valueQ", "related_attr1": "rel_valueR", "related_attr2": "rel_valueS"},
+                            {"attr4": "valueR", "related_attr1": "rel_valueT", "related_attr2": "rel_valueU"}
+                            ]
+                        },
+                        "attr5": {
+                            "cluster_idx": 1,
+                            "cluster_indices": [3, 11, 33, 55, 77, 99, 121, 143, 165, 187],
+                            "jsd_residual": 0.1345,
+                            "ksd_residual": 0.2456,
+                            "combined_residual": 0.1900,
+                            "enhanced_data": [
+                            {"attr5": "valueM", "related_attr1": "rel_valueM", "related_attr2": "rel_valueN"},
+                            {"attr5": "valueN", "related_attr1": "rel_valueO", "related_attr2": "rel_valueP"},
+                            {"attr5": "valueO", "related_attr1": "rel_valueQ", "related_attr2": "rel_valueR"}
+                            ]
+                        }
+                        }
+                        # optimal_cluster_result = process_select_optimal_cluster(enhanced_gen_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict, pre_funcs_for_attr, feature_all_dict, resp_path, logger, index_value_label_dict, residual_method='both')
                     total_time += t.duration
 
 

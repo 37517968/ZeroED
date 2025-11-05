@@ -88,9 +88,9 @@ def create_dirty_gen_inst_prompt(clean_vals, dirty_vals, target_attribute, num_e
         temp_vals = f"{target_attribute}: none"
     attrs = re.findall(r"'(\w+)':", str(temp_vals))
     template_dict_1 = {key: f'{key}_val_1' for key in attrs}
-    template_dict_1[target_attribute] = 'error_value_1'
+    template_dict_1[target_attribute] = 'clean_value_1'
     template_dict_2 = {key: f'{key}_val_2' for key in attrs}
-    template_dict_2[target_attribute] = 'error_value_2'
+    template_dict_2[target_attribute] = 'clean_value_2'
     
     prompt = f"""
 You are a data quality analyst. Your task is to inject realistic errors into clean data for the attribute `{target_attribute}`.
