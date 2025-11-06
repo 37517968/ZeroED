@@ -936,7 +936,7 @@ def calculate_ksd(sample1, sample2):
 
 def process_select_optimal_cluster(
     enhanced_gen_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict,
-     funcs_for_attr, feature_all_dict, resp_path, logger, index_value_label_dict, residual_method='both'
+     feature_all_dict, resp_path, logger, index_value_label_dict, residual_method='both'
 ):
     """
     从聚类结果中选出一个聚类并与增强数据合并，使其与dirty_csv的残差最小
@@ -1018,10 +1018,6 @@ def process_select_optimal_cluster(
                 if 'fasttext_feat' in row_features:
                     fasttext_feat = row_features['fasttext_feat']
                 
-                # 4. pre_funcs_feat，过滤掉-1的值
-                pre_funcs_feat = []
-                if 'pre_funcs_feat' in row_features:
-                    pre_funcs_feat = [feat for feat in row_features['pre_funcs_feat'] if feat != -1]
                 
                 # 按照feat_gen_df中的顺序合并特征
                 # 确保所有特征都是列表类型，避免NumPy数组导致的广播错误
@@ -1031,11 +1027,9 @@ def process_select_optimal_cluster(
                     pat_stats_feat = pat_stats_feat.tolist()
                 if isinstance(fasttext_feat, np.ndarray):
                     fasttext_feat = fasttext_feat.tolist()
-                if isinstance(pre_funcs_feat, np.ndarray):
-                    pre_funcs_feat = pre_funcs_feat.tolist()
                 
                 # 合并特征
-                merged_features = occur_cnt_feat + pat_stats_feat + fasttext_feat + pre_funcs_feat
+                merged_features = occur_cnt_feat + pat_stats_feat + fasttext_feat
                 ref_features.append(merged_features)
         
         # 如果没有提取到特征，则使用空数组
@@ -1075,7 +1069,7 @@ def process_select_optimal_cluster(
             
             # === 计算 combined_data 的特征 ===
             col_num = list(combined_data.columns).index(attr)
-            combined_feature_list, combined_feature_dict = feat_gen_df(combined_data, col_num, attr, related_attrs_dict, funcs_for_attr, resp_path)
+            combined_feature_list, combined_feature_dict = feat_gen_df(combined_data, col_num, attr, related_attrs_dict, resp_path)
             combined_feature_list = np.array(combined_feature_list, dtype=np.float64)
             # 处理可能的NaN或无限值
             combined_feature_list = np.nan_to_num(combined_feature_list)
@@ -1694,69 +1688,7 @@ if __name__ == "__main__":
                 total_time += t.duration
                 if (i != iterations-1):
                     with Timer('Select Optimal Cluster', logger, time_file) as t:
-                        optimal_cluster_result = {
-                        "attr1": {
-                            "cluster_idx": 2,
-                            "cluster_indices": [10, 15, 23, 45, 67, 89, 101, 123, 145, 167],
-                            "jsd_residual": 0.1234,
-                            "ksd_residual": 0.2345,
-                            "combined_residual": 0.1789,
-                            "enhanced_data": [
-                            {"attr1": "value1", "related_attr1": "rel_value1", "related_attr2": "rel_value2"},
-                            {"attr1": "value2", "related_attr1": "rel_value3", "related_attr2": "rel_value4"},
-                            {"attr1": "value3", "related_attr1": "rel_value5", "related_attr2": "rel_value6"}
-                            ]
-                        },
-                        "attr2": {
-                            "cluster_idx": 1,
-                            "cluster_indices": [5, 12, 34, 56, 78, 90, 112, 134, 156, 178],
-                            "jsd_residual": 0.0987,
-                            "ksd_residual": 0.1876,
-                            "combined_residual": 0.1431,
-                            "enhanced_data": [
-                            {"attr2": "valueA", "related_attr1": "rel_valueA", "related_attr2": "rel_valueB"},
-                            {"attr2": "valueB", "related_attr1": "rel_valueC", "related_attr2": "rel_valueD"},
-                            {"attr2": "valueC", "related_attr1": "rel_valueE", "related_attr2": "rel_valueF"}
-                            ]
-                        },
-                        "attr3": {
-                            "cluster_idx": 0,
-                            "cluster_indices": [1, 8, 20, 42, 64, 86, 108, 130, 152, 174],
-                            "jsd_residual": 0.1567,
-                            "ksd_residual": 0.2654,
-                            "combined_residual": 0.2110,
-                            "enhanced_data": [
-                            {"attr3": "valueX", "related_attr1": "rel_valueX", "related_attr2": "rel_valueY"},
-                            {"attr3": "valueY", "related_attr1": "rel_valueZ", "related_attr2": "rel_valueW"},
-                            {"attr3": "valueZ", "related_attr1": "rel_valueV", "related_attr2": "rel_valueU"}
-                            ]
-                        },
-                        "attr4": {
-                            "cluster_idx": 3,
-                            "cluster_indices": [7, 14, 36, 58, 80, 102, 124, 146, 168, 190],
-                            "jsd_residual": 0.0892,
-                            "ksd_residual": 0.1723,
-                            "combined_residual": 0.1307,
-                            "enhanced_data": [
-                            {"attr4": "valueP", "related_attr1": "rel_valueP", "related_attr2": "rel_valueQ"},
-                            {"attr4": "valueQ", "related_attr1": "rel_valueR", "related_attr2": "rel_valueS"},
-                            {"attr4": "valueR", "related_attr1": "rel_valueT", "related_attr2": "rel_valueU"}
-                            ]
-                        },
-                        "attr5": {
-                            "cluster_idx": 1,
-                            "cluster_indices": [3, 11, 33, 55, 77, 99, 121, 143, 165, 187],
-                            "jsd_residual": 0.1345,
-                            "ksd_residual": 0.2456,
-                            "combined_residual": 0.1900,
-                            "enhanced_data": [
-                            {"attr5": "valueM", "related_attr1": "rel_valueM", "related_attr2": "rel_valueN"},
-                            {"attr5": "valueN", "related_attr1": "rel_valueO", "related_attr2": "rel_valueP"},
-                            {"attr5": "valueO", "related_attr1": "rel_valueQ", "related_attr2": "rel_valueR"}
-                            ]
-                        }
-                        }
-                        # optimal_cluster_result = process_select_optimal_cluster(enhanced_gen_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict, pre_funcs_for_attr, feature_all_dict, resp_path, logger, index_value_label_dict, residual_method='both')
+                        optimal_cluster_result = process_select_optimal_cluster(enhanced_gen_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict, feature_all_dict, resp_path, logger, index_value_label_dict, residual_method='both')
                     total_time += t.duration
 
 
