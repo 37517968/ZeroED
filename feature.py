@@ -269,7 +269,7 @@ def feat_gen(dataset, col_num, col_name, related_attrs_dict, pre_funcs_for_attr,
     return np.array(feature_list), feature_all_dict
 
 
-def feat_gen_df(dirty_csv, col_num, col_name, related_attrs_dict, pre_funcs_for_attr, resp_path):
+def feat_gen_df(dirty_csv, col_num, col_name, pre_funcs_for_attr, resp_path):
     """
     基于feat_gen方法改造，接受DataFrame作为输入，生成对应的特征
     注意：dirty_csv已经是只包含相关属性的数据，不需要再处理相关属性
