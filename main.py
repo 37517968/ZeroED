@@ -403,7 +403,7 @@ def task_gen_enhanced_data(attr, dirty_csv, index_value_label_dict, related_attr
     filtered_clean = []
     filtered_clean.extend(right_values)
     for clean in clean_info:
-        if len(clean[3]) == 0 or len(clean[3].keys()) < len([attr]+related_attrs) or not isinstance(clean[3], dict):
+        if len(clean[3]) == 0 or not isinstance(clean[3], dict) or len(clean[3].keys()) < len([attr]+related_attrs) :
             continue
 
         try:
@@ -1069,7 +1069,7 @@ def process_select_optimal_cluster(
             
             # === 计算 combined_data 的特征 ===
             col_num = list(combined_data.columns).index(attr)
-            combined_feature_list, combined_feature_dict = feat_gen_df(combined_data, col_num, attr, related_attrs_dict, resp_path)
+            combined_feature_list, combined_feature_dict = feat_gen_df(combined_data, col_num, attr, [], resp_path)
             combined_feature_list = np.array(combined_feature_list, dtype=np.float64)
             # 处理可能的NaN或无限值
             combined_feature_list = np.nan_to_num(combined_feature_list)
@@ -1217,20 +1217,21 @@ def right_pat_in_text_attr(attr):
     return pattern
 
 
-def extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict):
+def extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict=None):
     """
     从LLM标注结果中提取标签，针对指定的indices
     
     Args:
         all_attrs: 所有属性列表
         error_checking_res_directory: 错误检查结果目录
-        cluster_index_dict: 聚类索引字典
-        center_value_dict: 中心值字典
-        indices_dict: 指定要提取的indices字典，格式为 {attr: [idx1, idx2, ...]}
+        indices_dict: 指定要提取的indices字典，格式为 {attr: [idx1, idx2, ...]}，如果为None则提取所有标签
     
     Returns:
         索引值标签字典
     """
+    # 如果indices_dict为None，则提取所有标签
+    if indices_dict is None:
+        return extract_all_llm_label_res(all_attrs, error_checking_res_directory)
     all_extracted_values = defaultdict(list)
     index_value_label_dict = defaultdict(list)
     
@@ -1269,6 +1270,68 @@ def extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict)
                 else:
                     temp_list.append((idx, value, 0))
             index_value_label_dict[attr] = temp_list
+    
+    return index_value_label_dict
+
+
+def extract_all_llm_label_res(all_attrs, error_checking_res_directory):
+    """
+    从LLM标注结果中提取所有标签，不限制indices
+    
+    Args:
+        all_attrs: 所有属性列表
+        error_checking_res_directory: 错误检查结果目录
+    
+    Returns:
+        索引值标签字典，格式为 {attr: [(idx, value, label), ...]}
+    """
+    index_value_label_dict = defaultdict(list)
+    
+    for attr in all_attrs:
+        content = ""
+        with open(os.path.join(error_checking_res_directory, f'error_checking_{attr}.txt'), 'r', encoding='utf-8') as f:
+            content = f.read()
+        content = content.replace('\\+', '').replace('\\n', '\n')
+        
+        # 使用正则表达式匹配每个块
+        block_pattern = r'// indices: \[(.*?)\]\s*```json\s*(\{[\s\S]*?\})\s*```'
+        blocks = re.findall(block_pattern, content, re.DOTALL)
+        
+        for indices_str, json_content in blocks:
+            try:
+                # 解析indices列表，先去除换行符
+                indices_str_clean = indices_str.replace('\n', ' ').strip()
+                # 直接手动分割字符串，提取数字
+                indices = [int(idx.strip()) for idx in indices_str_clean.split() if idx.strip().isdigit()]
+                
+                # 解析JSON内容
+                json_data = json.loads(json_content)
+                entries = json_data.get('entries', [])
+                
+                # 确保indices和entries的数量匹配
+                if len(indices) != len(entries):
+                    print(f"Warning: indices and entries count mismatch for {attr}")
+                    continue
+                
+                # 处理每个条目
+                for idx, entry in zip(indices, entries):
+                    try:
+                        # 获取该索引处的值
+                        related_attrs = list(related_attrs_dict[attr])
+                        value = dirty_csv.loc[idx, [attr] + related_attrs].to_dict()
+                        
+                        # 从JSON条目中获取标签
+                        label_key = f"has_error_in_{attr}_value"
+                        label = 1 if entry.get(label_key, False) else 0
+                        
+                        # 添加到结果字典
+                        index_value_label_dict[attr].append((idx, value, label))
+                    except Exception as e:
+                        print(f"Error processing entry for {attr}, index {idx}: {e}")
+                        continue
+            except Exception as e:
+                print(f"Error processing block for {attr}: {e}")
+                continue
     
     return index_value_label_dict
 
@@ -1493,6 +1556,8 @@ if __name__ == "__main__":
     ENHANCED_USE = config['model']['enhanced_use']
     ERR_GEN_USE = config['model']['err_gen_use']
     REL_TOP = config['model']['rel_top']
+    ITERATIONS = config['model']['iterations']
+    EXTRA_ALL_LABEL = config['model']['extra_all_label']
     
     # Read settings
     PRE_FUNC_READ = config['read']['pre_func']
@@ -1610,7 +1675,7 @@ if __name__ == "__main__":
             with Timer('Constructing Guidelines', logger, time_file) as t:
                 guide_content = process_guidlines(GUIDE_USE, GUIDE_READ, dataset, read_path, read_guide_path, resp_path, dirty_csv, all_attrs, guide_directory, cluster_index_dict, distri_analy_content)
             total_time += t.duration
-            iterations = 4
+            iterations = ITERATIONS
             # 初始化labeled_number为0
             labeled_number = 0
             # 初始化index_value_label_dict
@@ -1659,8 +1724,11 @@ if __name__ == "__main__":
                 total_time += t.duration
                 
                 with Timer('Extract Labeling Results', logger, time_file) as t:
-                    # 使用相同的indices字典提取标注结果
-                    current_index_value_label_dict = extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict)
+                    if (EXTRA_ALL_LABEL):
+                        current_index_value_label_dict = extract_llm_label_res(all_attrs, error_checking_res_directory)
+                    else:
+                        # 使用相同的indices字典提取标注结果
+                        current_index_value_label_dict = extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict)
                     if i == 0:
                         center_index_value_label_dict = current_index_value_label_dict
                 total_time += t.duration
@@ -1693,6 +1761,13 @@ if __name__ == "__main__":
 
 
             para_file.write(f"LLM labeled value number: {labeled_number}\n")
+
+            # 保存每列增强的干净数据和脏数据的数量
+            para_file.write("\nEnhanced Data Statistics:\n")
+            for attr, data in enhanced_gen_dict.items():
+                clean_count = len(data['clean'])
+                dirty_count = len(data['dirty'])
+                para_file.write(f"{attr}: clean_data_count={clean_count}, dirty_data_count={dirty_count}\n")
             det_wrong_list, det_right_list = [], []
             with Timer('Label Propagation', logger, time_file) as t:
                 det_wrong_list, det_right_list = label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, index_value_label_dict)
