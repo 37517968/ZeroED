@@ -15,6 +15,9 @@ from sklearn.metrics import pairwise_distances, pairwise_distances_argmin_min
 from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
 from utility import default_dict_of_lists
+import os
+import time
+import threading
 
 max_workers = 128
 
@@ -451,3 +454,112 @@ def cluster(dataset, cluster_method, n_method, col_num, related_attrs_dict, pre_
         else:
             val_feat_dict[key] = [feat_val]
     return col_num, closest, clusters, val_feat_dict, feature_all_dict
+
+# ==============================
+# ① 全局统计缓存生成函数
+# ==============================
+def feat_gen_global_cache(dirty_csv, related_attrs_dict):
+    """
+    生成全局特征计算所需的缓存（只计算一次）
+    """
+    print("[Global Cache] 正在初始化全局特征缓存...")
+
+    # 1️⃣ 确保数据为字符串并填充空值
+    dirty_csv = dirty_csv.astype(str).fillna('nan')
+
+    # 2️⃣ 临时文件路径（供共现统计函数使用）
+    thread_id = threading.get_ident()
+    timestamp = int(time.time() * 1000)
+    temp_csv_path = f'./temp_dirty_csv_{thread_id}_{timestamp}.csv'
+    dirty_csv.to_csv(temp_csv_path, index=False)
+    _, co_occur_dict = count_attribute_value_pairs(temp_csv_path)
+
+    # 3️⃣ Pattern 统计
+    cell_pat_stats = {attr: {} for attr in dirty_csv.columns}
+    results = []
+    for row in tqdm(range(len(dirty_csv)), ncols=90, desc="[Global Cache] Pattern统计"):
+        result = process_row(row, dirty_csv, list(dirty_csv.columns), 0)  # col_num可忽略
+        results.append(result)
+    for _, row_pat_stats in results:
+        for attr, pat_dict in row_pat_stats.items():
+            for pat, count in pat_dict.items():
+                cell_pat_stats[attr][pat] = cell_pat_stats[attr].get(pat, 0) + count
+
+    # 4️⃣ FastText模型加载（仅一次）
+    model = fasttext.load_model('./cc.en.300.bin')
+    fasttext_dimension = len(dirty_csv.columns)
+    fasttext.util.reduce_model(model, fasttext_dimension)
+
+    # 6️⃣ 删除临时文件
+    if os.path.exists(temp_csv_path):
+        os.remove(temp_csv_path)
+
+    print("[Global Cache] 全局缓存构建完成 ✅")
+
+    return {
+        'co_occur_dict': co_occur_dict,
+        'cell_pat_stats': cell_pat_stats,
+        'fasttext_model': model,
+    }
+
+
+# ==============================
+# ② 增量特征计算函数
+# ==============================
+def feat_gen_df_incremental(df, col_num, col_name, pre_funcs_for_attr, resp_path, global_cache, scaler=None):
+    """
+    使用全局缓存计算特征（增量方式）
+    """
+    df = df.astype(str).fillna('nan')
+    all_attrs = list(df.columns)
+    co_occur_dict = global_cache['co_occur_dict']
+    cell_pat_stats = global_cache['cell_pat_stats']
+    model = global_cache['fasttext_model']
+
+    fasttext_list = {}
+    pre_funcs_feat = {}
+    for row in range(len(df)):
+        fasttext_list[row] = {}
+        pre_funcs_feat[row] = {}
+
+        # 当前列向量
+        fast_vec = model.get_word_vector(str(df.iloc[row, col_num]))
+        fasttext_list[row][col_num] = fast_vec
+
+        # 添加其他列向量
+        for i in range(len(all_attrs)):
+            if i != col_num:
+                rel_vec = model.get_word_vector(str(df.iloc[row, i]))
+                fasttext_list[row][col_num] = np.append(fasttext_list[row][col_num], rel_vec)
+
+        # 预处理函数特征
+        if col_name in pre_funcs_for_attr and len(pre_funcs_for_attr[col_name]['clean']) > 0:
+            row_val = df.iloc[row].to_dict()
+            pre_funcs_feat_temp = np.array([
+                handle_func_exec(func, row_val, col_name)
+                for func in pre_funcs_for_attr[col_name]['clean']
+            ])
+            pre_funcs_feat[row][col_num] = pre_funcs_feat_temp
+        else:
+            pre_funcs_feat[row][col_num] = np.array([])
+
+    # 计算最终特征
+    feature_list = []
+    feature_all_dict = defaultdict(default_dict_of_lists)
+    for row in range(len(df)):
+        feature, feat_single_dict_tmp = feat_gen_single(
+            df, co_occur_dict, {}, cell_pat_stats,
+            fasttext_list, pre_funcs_feat, row, col_num,
+            df.iloc[row, col_num], resp_path
+        )
+        feature_list.append(feature)
+        feature_all_dict.update(feat_single_dict_tmp)
+
+    feature_list = np.array(feature_list)
+    feature_list = np.nan_to_num(feature_list)
+    if (scaler == None):
+        scaler = MinMaxScaler()
+        scaler.fit(np.array(feature_list))
+    feature_list = scaler.transform(np.array(feature_list))
+
+    return feature_list, feature_all_dict, scaler
