@@ -21,7 +21,7 @@ from sklearn.neural_network import MLPClassifier
 from tqdm import tqdm
 
 from distri_analys import LLMDataDistrAnalyzer
-from feature import cluster, feat_gen_df
+from feature import cluster, feat_gen_df, feat_gen_df_incremental, feat_gen_global_cache
 from get_rel_attrs import (cal_all_column_nmi, cal_strong_res_column_nmi)
 from measure import measure_detect
 from prompt_gen import (create_err_gen_inst_prompt, err_clean_func_prompt,
@@ -790,7 +790,7 @@ def process_cluster(n_method, CLUSTER_READ, dataset, read_path, resp_path, dirty
     if not CLUSTER_READ:
         for col in range(len(all_attrs)):
             try:
-                col_result, center_list, cluster_list, val_feat_dict, feature_dict_attr = cluster(dataset, 'RANDOM', n_method, col, related_attrs_dict, pre_funcs_for_attr, resp_path)
+                col_result, center_list, cluster_list, val_feat_dict, feature_dict_attr = cluster(dataset, 'KMeans', n_method, col, related_attrs_dict, pre_funcs_for_attr, resp_path)
                 cluster_list.insert(0, center_list)
                 cluster_index_dict[all_attrs[col]] = cluster_list
                 feature_all_dict.update(feature_dict_attr)
@@ -936,7 +936,7 @@ def calculate_ksd(sample1, sample2):
 
 def process_select_optimal_cluster(
     enhanced_gen_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict,
-     feature_all_dict, resp_path, logger, index_value_label_dict, residual_method='both'
+     pre_funcs_for_attr, resp_path, logger, index_value_label_dict, residual_method='both'
 ):
     """
     从聚类结果中选出一个聚类并与增强数据合并，使其与dirty_csv的残差最小
@@ -948,11 +948,14 @@ def process_select_optimal_cluster(
     # 全局加载FastText模型，避免重复加载
     try:
         fasttext_model = fasttext.load_model('./cc.en.300.bin')
-        fasttext_dimension = len(dirty_csv.columns)
+        # fasttext_dimension = len(dirty_csv.columns)
+        fasttext_dimension = len(related_attrs_dict[next(iter(related_attrs_dict))]) + 1
         fasttext.util.reduce_model(fasttext_model, fasttext_dimension)
     except Exception as e:
         logger.error(f"加载FastText模型失败: {str(e)}")
         return optimal_cluster_info_dict
+
+    global_cache = feat_gen_global_cache(dirty_csv, related_attrs_dict)
 
     # 并行处理每个属性
     def process_attr(attr):
@@ -975,74 +978,17 @@ def process_select_optimal_cluster(
         col_num = list(dirty_csv.columns).index(attr)
 
         # 从feature_all_dict中提取ref_features，不再重复计算
-        ref_features = []
-        for row_idx in range(len(dirty_csv)):
-            if (row_idx, col_num) in feature_all_dict:
-                # 获取当前行的特征字典
-                row_features = feature_all_dict[(row_idx, col_num)]
-                
-                # 按照feat_gen_df中的顺序合并特征
-                # 1. occur_cnt_feat
-                occur_cnt_feat = []
-                if 'occur_cnt_feat' in row_features:
-                    # 获取所有属性的列名
-                    all_attr_columns = list(dirty_csv.columns)
-                    # 获取related_attrs在所有属性中的索引
-                    related_attr_indices = [all_attr_columns.index(rel_attr) for rel_attr in related_attrs]
-                    
-                    # occur_cnt_feat是按照所有属性（除了当前属性）的顺序排列的
-                    # 我们需要找到related_attrs对应的特征
-                    # 首先构建一个从属性索引到occur_cnt_feat中位置的映射
-                    # occur_cnt_feat中不包含当前属性，所以需要调整索引
-                    attr_to_feat_pos = {}
-                    feat_pos = 0
-                    for i, col_name in enumerate(all_attr_columns):
-                        if i != col_num:  # 跳过当前属性
-                            attr_to_feat_pos[i] = feat_pos
-                            feat_pos += 1
-                    
-                    # 提取related_attrs对应的特征
-                    for rel_attr_idx in related_attr_indices:
-                        if rel_attr_idx in attr_to_feat_pos:
-                            feat_pos = attr_to_feat_pos[rel_attr_idx]
-                            if feat_pos < len(row_features['occur_cnt_feat']):
-                                occur_cnt_feat.append(row_features['occur_cnt_feat'][feat_pos])
-                
-                # 2. pat_stats_feat
-                pat_stats_feat = []
-                if 'pat_stats_feat' in row_features:
-                    pat_stats_feat = row_features['pat_stats_feat']
-                
-                # 3. fasttext_feat
-                fasttext_feat = []
-                if 'fasttext_feat' in row_features:
-                    fasttext_feat = row_features['fasttext_feat']
-                
-                
-                # 按照feat_gen_df中的顺序合并特征
-                # 确保所有特征都是列表类型，避免NumPy数组导致的广播错误
-                if isinstance(occur_cnt_feat, np.ndarray):
-                    occur_cnt_feat = occur_cnt_feat.tolist()
-                if isinstance(pat_stats_feat, np.ndarray):
-                    pat_stats_feat = pat_stats_feat.tolist()
-                if isinstance(fasttext_feat, np.ndarray):
-                    fasttext_feat = fasttext_feat.tolist()
-                
-                # 合并特征
-                merged_features = occur_cnt_feat + pat_stats_feat + fasttext_feat
-                ref_features.append(merged_features)
-        
-        # 如果没有提取到特征，则使用空数组
-        if not ref_features:
-            logger.warning(f"属性 {attr} 未能从feature_all_dict中提取到特征，使用空数组")
-            ref_features = [[] for _ in range(len(dirty_csv))]
-        
+        ref_data = dirty_csv.loc[:, [attr] + related_attrs]
+        ref_df = pd.DataFrame(ref_data) if not ref_data.empty else pd.DataFrame()
+        col_num = list(ref_df.columns).index(attr)
+        # ref_features, ref_feature_dict = feat_gen_df(ref_df, col_num, attr, pre_funcs_for_attr, resp_path)
+        ref_features, _, scaler = feat_gen_df_incremental(ref_df, col_num, attr, pre_funcs_for_attr, resp_path, global_cache)
         ref_features = np.array(ref_features, dtype=np.float64)
         # 处理可能的NaN或无限值
         ref_features = np.nan_to_num(ref_features)
 
         # 遍历聚类
-        for cluster_idx, cluster_indices in enumerate(clusters):
+        for cluster_idx, cluster_indices in enumerate(clusters[1:], start=0):
             if len(cluster_indices) == 0:
                 continue
                 
@@ -1066,14 +1012,18 @@ def process_select_optimal_cluster(
             
             # 合并所有数据
             combined_data = pd.concat([cluster_data, enhanced_df, labeled_df], ignore_index=True)
-            
+            if combined_data.empty:
+                continue
+
             # === 计算 combined_data 的特征 ===
-            col_num = list(combined_data.columns).index(attr)
-            combined_feature_list, combined_feature_dict = feat_gen_df(combined_data, col_num, attr, [], resp_path)
-            combined_feature_list = np.array(combined_feature_list, dtype=np.float64)
+            # col_num = list(combined_data.columns).index(attr)
+            # combined_feature_list, combined_feature_dict = feat_gen_df(combined_data, col_num, attr, pre_funcs_for_attr, resp_path)
+            # combined_feature_list = np.array(combined_feature_list, dtype=np.float64)
+            combined_feature_list, _, _ = feat_gen_df_incremental(
+                combined_data, col_num, attr, pre_funcs_for_attr, resp_path, global_cache, scaler
+            )
             # 处理可能的NaN或无限值
             combined_feature_list = np.nan_to_num(combined_feature_list)
-
             # === 计算残差 ===
             try:
                 if residual_method in ['jsd', 'both']:
@@ -1686,7 +1636,7 @@ if __name__ == "__main__":
                 # 准备indices字典
                 if i == 0:
                     # 第一次迭代使用聚类中心indices
-                    indices_dict = {attr: cluster_index_dict[attr][0] for attr in all_attrs}
+                    indices_dict = {attr: clusters[0] for attr, clusters in cluster_index_dict.items()}
                 else:
                     # 后续迭代使用最优聚类indices
                     indices_dict = {attr: optimal_cluster_result[attr]['cluster_indices'] for attr in all_attrs if attr in optimal_cluster_result}
@@ -1756,7 +1706,7 @@ if __name__ == "__main__":
                 total_time += t.duration
                 if (i != iterations-1):
                     with Timer('Select Optimal Cluster', logger, time_file) as t:
-                        optimal_cluster_result = process_select_optimal_cluster(enhanced_gen_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict, feature_all_dict, resp_path, logger, index_value_label_dict, residual_method='both')
+                        optimal_cluster_result = process_select_optimal_cluster(enhanced_gen_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict, pre_funcs_for_attr, resp_path, logger, index_value_label_dict, residual_method='both')
                     total_time += t.duration
 
 
