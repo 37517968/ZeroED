@@ -1,26 +1,28 @@
 model:
+  iterations: 2
   api_use: true
   pre_func_use: true
   related_attrs: true
   distri_analysis: true
-  guide_use: false
   func_use: true
-  enhanced_use: true
+  enhanced_use: false
   n_method: '5%'
   err_gen_use: false
+  guide_use: false
   rel_top: 2
   run_info: '0Following results running with rereading (after running, if result not idea, suggest rereading, as file reading problem)'
   func_val_threshold: 0.5
 
 read:
   pre_func: true
-  distri_analysis: true
   related_attrs: true
   cluster: true
-  guide: false
   error_checking: true
+  extra_all_label: false
   func: true
-  enhanced: true
+  enhanced: false
+  distri_analysis: false
+  guide: false
   err_gen: false
   read_in_batch: false
   start_time: '02-14-19:32'  
@@ -36,7 +38,7 @@ data:
   
 
 read_paths:
-  flights01-1: './result/pipeline/10-30 flights01-5%-set1/'
+  flights01-1: './result/pipeline/11-10 flights01-5%-set1-iterations2/'
   # flights01-1: './result/pipeline/02-08 flights01-5%-set1/'
   # flights01-2: './result/pipeline/02-08 flights01-5%-set2/'
   # flights01-3: './result/pipeline/02-08 flights01-5%-set3/'
