@@ -1,12 +1,12 @@
 model:
-  iterations: 2
+  iterations: 20
   api_use: true
   pre_func_use: true
   related_attrs: true
-  distri_analysis: true
   func_use: true
-  enhanced_use: false
+  enhanced_use: true
   n_method: '5%'
+  distri_analysis: false
   err_gen_use: false
   guide_use: false
   rel_top: 2
@@ -14,12 +14,12 @@ model:
   func_val_threshold: 0.5
 
 read:
-  pre_func: true
-  related_attrs: true
-  cluster: true
-  error_checking: true
+  pre_func: false
+  related_attrs: false
+  cluster: false
+  error_checking: false
   extra_all_label: false
-  func: true
+  func: false
   enhanced: false
   distri_analysis: false
   guide: false

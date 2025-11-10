@@ -440,13 +440,13 @@ def task_gen_enhanced_data(attr, dirty_csv, index_value_label_dict, related_attr
         num_batches = (num_gen + 19) // 20  # 向上取整
         for batch in range(num_batches):
             batch_size = min(20, num_gen - batch * 20)
-            clean_gen_prompt = create_clean_gen_inst_prompt(right_values_tmp, attr, num_gen=batch_size)
+            clean_gen_prompt = create_clean_gen_inst_prompt(right_values_tmp, wrong_values_tmp, attr, num_gen=batch_size)
             batch_clean_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE)
             clean_gen_ans += batch_clean_ans + "\n\n"
             clean_gen_prompt_file.write('*'*20 + f' batch {batch+1} prompt ' + '*'*20 + '\n' + clean_gen_prompt + '\n' + '*'*20 + f' batch {batch+1} answer ' + '*'*20 + '\n' + batch_clean_ans + '\n\n\n\n\n\n')
     else:
         # 一次性生成
-        clean_gen_prompt = create_clean_gen_inst_prompt(right_values_tmp, attr, num_gen=num_gen)
+        clean_gen_prompt = create_clean_gen_inst_prompt(right_values_tmp, wrong_values_tmp, attr, num_gen=num_gen)
         clean_gen_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE)
         clean_gen_prompt_file.write('*'*20 + ' prompt ' + '*'*20 + '\n' + clean_gen_prompt + '\n' + '*'*20 + ' answer ' + '*'*20 + '\n' + clean_gen_ans + '\n\n\n\n\n\n')
     clean_gen_prompt_file.close()
@@ -458,7 +458,7 @@ def task_gen_enhanced_data(attr, dirty_csv, index_value_label_dict, related_attr
     filtered_clean = []
     filtered_clean.extend(right_values)
     for clean in clean_info:
-        if len(clean[3]) == 0 or not isinstance(clean[3], dict) or len(clean[3].keys()) < len([attr]+related_attrs) :
+        if len(clean) < 4 or len(clean[3]) == 0 or not isinstance(clean[3], dict) or len(clean[3].keys()) < len([attr]+related_attrs) :
             continue
 
         try:
@@ -500,7 +500,7 @@ def task_gen_enhanced_data(attr, dirty_csv, index_value_label_dict, related_attr
     filtered_dirty.extend(wrong_values)
     for dirty in dirty_info:
         try:
-            if len(dirty[3]) == 0 or len(dirty[3].keys()) < len([attr]+related_attrs) or not isinstance(dirty[3], dict):
+            if len(dirty) < 4 or len(dirty[3]) == 0 or len(dirty[3].keys()) < len([attr]+related_attrs) or not isinstance(dirty[3], dict):
                 continue
             if dirty[0] in all_attrs and str(dirty[-1]).strip() not in right_values and str(
                     dirty[-1]).strip() not in wrong_values:

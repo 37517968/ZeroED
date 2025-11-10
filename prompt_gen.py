@@ -124,9 +124,11 @@ Please ensure that:
 """
     return prompt
 
-def create_clean_gen_inst_prompt(clean_vals, target_attribute, num_gen=20):
+def create_clean_gen_inst_prompt(clean_vals, dirty_vals, target_attribute, num_gen=20):
     if len(clean_vals) > 0:
         temp_vals = clean_vals[0]
+    elif len(dirty_vals) > 0:
+        temp_vals = dirty_vals[0]
     else:
         print(f"No vals in clean_vals of attr {target_attribute}")
         temp_vals = f"{target_attribute}: none"
@@ -147,8 +149,12 @@ I will provide you with a sample of **clean** values in a tabular format for var
 
 Your task is to analyze the data and identify inner relationships. Based on this analysis, generate clean values specifically for the attribute `{target_attribute}` that follow the same patterns and distribution as the examples.
 """
-    prompt += f"For the attribute `{target_attribute}`, here are the given **clean** tuples as examples:\n"
-    prompt += '\n'.join([str(i) for i in clean_vals]) + '\n\n'
+    if clean_vals:
+        prompt += f"For the attribute `{target_attribute}`, here are the given **clean** tuples as examples:\n"
+        prompt += '\n'.join([str(i) for i in clean_vals]) + '\n\n'
+    if dirty_vals:
+        prompt += f"There are also some **wrong** tuples for reference:\n"
+        prompt += '\n'.join([str(i) for i in dirty_vals]) + '\n\n'
     prompt += f"Please analyze the data patterns and generate {num_gen} realistic clean values specifically for the attribute `{target_attribute}`:\n"
     prompt += f"""
 The output should be in the following strict format:
