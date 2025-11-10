@@ -152,10 +152,10 @@ Your task is to analyze the data and identify inner relationships. Based on this
     prompt += f"Please analyze the data patterns and generate {num_gen} realistic clean values specifically for the attribute `{target_attribute}`:\n"
     prompt += f"""
 The output should be in the following strict format:
-['{target_attribute}', clean_value_1, Reason: 'Pattern description: Specific reason', {str(template_dict_1)}]
-['{target_attribute}', clean_value_2, Reason: 'Pattern description: Specific reason', {str(template_dict_2)}]
+['{target_attribute}', clean_value_1, Pattern description: 'Specific description', {str(template_dict_1)}]
+['{target_attribute}', clean_value_2, Pattern description: 'Specific description', {str(template_dict_2)}]
 ...
-Please ensure that the reasons for each clean value are clearly specified, explaining the pattern it follows.
+Please ensure that the descriptions for each clean value are clearly specified, explaining the pattern it follows.
 Do not duplicate the reference values exactly, but create new values that follow the same distribution.
 --------------------------------------------------------------------------
 """

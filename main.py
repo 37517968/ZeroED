@@ -136,8 +136,6 @@ def extract_enhanced_info(text, attr):
                     parsed_data = ast.literal_eval(data)
                 except (SyntaxError, ValueError) as e:
                     # 如果 ast.literal_eval 失败，使用自定义解析逻辑
-                    print(f"ast.literal_eval failed for line: {line}, error: {e}")
-                    # 使用自定义解析函数
                     parsed_data = parse_complex_list(data)
                 
                 err_info.append(attr_name)
@@ -157,52 +155,112 @@ def extract_enhanced_info(text, attr):
 def parse_complex_list(data_str):
     """
     解析包含特殊字符的复杂列表字符串
-    处理包含单引号、连字符、O'Hare等特殊字符的情况
+    使用简单的方法：用单引号和逗号解析前两个元组，用大括号解析最后的词典结构
     """
     try:
         # 移除外层方括号
         content = data_str.strip('[]')
         
-        # 使用正则表达式分割元素，考虑引号内的逗号和特殊字符
-        # 这个模式可以处理：
-        # 1. 单引号字符串: 'text'
-        # 2. 双引号字符串: "text"
-        # 3. 字典: {...}
-        # 4. 不含逗号的普通文本
-        pattern = r'(\'[^\']*\'|"[^"]*"|\{[^}]*\}|[^,]+)'
-        matches = re.findall(pattern, content)
-        
-        # 清理每个元素
+        # 初始化结果列表
         parsed_data = []
-        for match in matches:
-            match = match.strip()
-            # 如果是字典，保持原样
-            if match.startswith('{') and match.endswith('}'):
-                try:
-                    # 尝试解析字典
-                    dict_match = re.match(r'\{(.*)\}', match)
-                    if dict_match:
-                        dict_content = dict_match.group(1)
-                        # 分割字典键值对，处理包含单引号的值
-                        kv_pairs = re.findall(r'([^:]+):\s*(\'[^\']*\'|"[^"]*"|[^,]+)', dict_content)
-                        result_dict = {}
-                        for k, v in kv_pairs:
-                            k = k.strip().strip('\'"')
-                            v = v.strip()
-                            # 处理包含单引号的值，如 'O'Hare'
-                            if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
-                                # 移除外层引号，保留内部引号
-                                v = v[1:-1]
-                            result_dict[k] = v
-                        parsed_data.append(result_dict)
-                    else:
-                        parsed_data.append(match)
-                except Exception as e:
-                    print(f"Error parsing dictionary: {e}")
-                    parsed_data.append(match)
+        
+        # 查找字典部分的开始位置（第一个大括号）
+        dict_start = content.find('{')
+        
+        if dict_start == -1:
+            # 如果没有字典，使用简单的逗号分割
+            parts = content.split(',')
+            for part in parts:
+                parsed_data.append(part.strip().strip('\'"'))
+            return parsed_data
+        
+        # 分割非字典部分和字典部分
+        non_dict_part = content[:dict_start].strip()
+        dict_part = content[dict_start:].strip()
+        
+        # 处理非字典部分（前两个元组）
+        if non_dict_part:
+            # 使用正则表达式匹配单引号字符串
+            pattern = r'\'([^\']*)\''
+            matches = re.findall(pattern, non_dict_part)
+            
+            # 如果没有找到单引号字符串，尝试用逗号分割
+            if not matches:
+                parts = non_dict_part.split(',')
+                for part in parts:
+                    if part.strip():
+                        parsed_data.append(part.strip())
             else:
-                # 移除引号
-                parsed_data.append(match.strip('\'"'))
+                # 添加匹配到的字符串
+                for match in matches:
+                    if match.strip():
+                        parsed_data.append(match.strip())
+        
+        # 处理字典部分
+        if dict_part.startswith('{') and dict_part.endswith('}'):
+            try:
+                # 尝试使用json.loads解析字典（如果格式正确）
+                try:
+                    # 将单引号替换为双引号，以便json.loads可以解析
+                    json_str = dict_part.replace("'", '"')
+                    parsed_dict = json.loads(json_str)
+                    parsed_data.append(parsed_dict)
+                except json.JSONDecodeError:
+                    # 如果json.loads失败，使用自定义解析逻辑
+                    dict_content = dict_part[1:-1]  # 移除外层大括号
+                    
+                    # 分割键值对
+                    result_dict = {}
+                    
+                    # 处理Reason和pattern description
+                    reason_match = re.search(r'Reason:\s*([^,]+)', dict_content)
+                    if reason_match:
+                        result_dict['Reason'] = reason_match.group(1).strip()
+                    
+                    pattern_match = re.search(r'pattern description:\s*([^,}]+)', dict_content)
+                    if pattern_match:
+                        result_dict['pattern description'] = pattern_match.group(1).strip()
+                    
+                    # 处理其他键值对
+                    # 使用正则表达式匹配键值对
+                    kv_pattern = r'([^:]+):\s*([^,}]+)'
+                    kv_matches = re.findall(kv_pattern, dict_content)
+                    
+                    for k, v in kv_matches:
+                        k = k.strip().strip('\'"')
+                        v = v.strip()
+                        
+                        # 跳过已经处理的Reason和pattern description
+                        if k in ['Reason', 'pattern description']:
+                            continue
+                            
+                        # 处理引号
+                        if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
+                            v = v[1:-1]
+                        
+                        result_dict[k] = v
+                    
+                    parsed_data.append(result_dict)
+            except Exception as e:
+                print(f"Error parsing dictionary: {e}")
+                # 如果解析失败，尝试使用简单的键值对分割
+                try:
+                    dict_content = dict_part[1:-1]  # 移除外层大括号
+                    # 分割字典键值对，处理包含单引号的值
+                    kv_pairs = re.findall(r'([^:]+):\s*(\'[^\']*\'|"[^"]*"|[^,]+)', dict_content)
+                    result_dict = {}
+                    for k, v in kv_pairs:
+                        k = k.strip().strip('\'"')
+                        v = v.strip()
+                        # 处理包含单引号的值，如 'O'Hare'
+                        if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
+                            # 移除外层引号，保留内部引号
+                            v = v[1:-1]
+                        result_dict[k] = v
+                    parsed_data.append(result_dict)
+                except Exception as e2:
+                    print(f"Error in fallback dictionary parsing: {e2}")
+                    parsed_data.append(dict_part)
         
         return parsed_data
     except Exception as e:
@@ -360,14 +418,11 @@ def task_gen_enhanced_data(attr, dirty_csv, index_value_label_dict, related_attr
     dirty_gen_file.write(sep)
     wrong_values = []
     right_values = []
-    used_idx_list = {}
     for idx, _, label in index_value_label_dict[attr]:
         if label == 1:
             wrong_values.append(dirty_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
-            used_idx_list[idx] = 1
         elif label == 0:
             right_values.append(dirty_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
-            used_idx_list[idx] = 1
     max_vals = 20
     if len(wrong_values) > max_vals:
         wrong_values_tmp = wrong_values[:max_vals]
@@ -1507,7 +1562,7 @@ if __name__ == "__main__":
     ERR_GEN_USE = config['model']['err_gen_use']
     REL_TOP = config['model']['rel_top']
     ITERATIONS = config['model']['iterations']
-    EXTRA_ALL_LABEL = config['model']['extra_all_label']
+    
     
     # Read settings
     PRE_FUNC_READ = config['read']['pre_func']
@@ -1516,6 +1571,7 @@ if __name__ == "__main__":
     CLUSTER_READ = config['read']['cluster']
     GUIDE_READ = config['read']['guide']
     ERROR_CHECKING_READ = config['read']['error_checking']
+    EXTRA_ALL_LABEL = config['read']['extra_all_label']
     FUNC_READ = config['read']['func']
     ENHANCED_READ = config['read']['enhanced']
     ERR_GEN_READ = config['read']['err_gen']
