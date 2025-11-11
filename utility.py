@@ -183,9 +183,6 @@ def query_base(query, GPT_USE=True):
 def split_list_to_sublists(original_list, sublist_size):
     if sublist_size == 0:
         return [original_list]
-    shuffled_list = original_list.copy()
-    random.shuffle(shuffled_list)
-    original_list = shuffled_list
     return [original_list[idx:idx + sublist_size] for idx in range(0, len(original_list), sublist_size)]
 
 
