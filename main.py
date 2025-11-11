@@ -1614,7 +1614,7 @@ if __name__ == "__main__":
             read_error_path = read_path + 'funcs'
             
             date_time = datetime.now().strftime("%m-%d")
-            resp_path = f"{base_dir}/result/{result_dir}/{date_time} {dataset}{err_rate}-{n_method}-set{set_num}"
+            resp_path = f"{base_dir}/result/{result_dir}/{date_time} {dataset}{err_rate}-{n_method}-set{set_num}-iterations{ITERATIONS}"
             guide_directory = f'{resp_path}/guide'
             error_checking_res_directory = f'{resp_path}/error_checking'
             funcs_directory = f'{resp_path}/funcs'

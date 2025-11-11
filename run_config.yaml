@@ -1,5 +1,5 @@
 model:
-  iterations: 1
+  iterations: 2
   api_use: true
   pre_func_use: true
   related_attrs: true
@@ -14,12 +14,12 @@ model:
   func_val_threshold: 0.5
 
 read:
-  pre_func: false
-  related_attrs: false
-  cluster: false
-  error_checking: false
+  pre_func: true
+  related_attrs: true
+  cluster: true
+  error_checking: true
   extra_all_label: false
-  func: false
+  func: true
   enhanced: false
   distri_analysis: false
   guide: false
@@ -38,7 +38,7 @@ data:
   
 
 read_paths:
-  flights01-1: './result/pipeline/11-06 flights01-5%-set1-iterations1/'
+  flights01-1: './result/pipeline/11-11 flights01-5%-set1-iterations1/'
   # flights01-1: './result/pipeline/02-08 flights01-5%-set1/'
   # flights01-2: './result/pipeline/02-08 flights01-5%-set2/'
   # flights01-3: './result/pipeline/02-08 flights01-5%-set3/'
