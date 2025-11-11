@@ -1593,11 +1593,12 @@ if __name__ == "__main__":
         read_path_dict = get_read_paths(config['read']['start_time'], config['read']['end_time'], base_dir)
     
     date_time = datetime.now().strftime("%m-%d")
-    run_info = config['model']['run_info']
-    info_path = f"{base_dir}/result/{result_dir}/{date_time} {run_info}"
-    os.makedirs(info_path, exist_ok=True)
-    with open(os.path.join(info_path, 'config.yaml'), 'w') as f:
-        yaml.dump(config, f, default_flow_style=False)
+    # 记录运行配置信息
+    # run_info = config['model']['run_info']
+    # info_path = f"{base_dir}/result/{result_dir}/{date_time} {run_info}"
+    # os.makedirs(info_path, exist_ok=True)
+    # with open(os.path.join(info_path, 'config.yaml'), 'w') as f:
+    #     yaml.dump(config, f, default_flow_style=False)
     
     for set_num, dataset in zip(set_num_list, dataset_list):
         for err_rate in err_rate_list:
