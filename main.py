@@ -352,6 +352,7 @@ def process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ, read_enhanced_path, e
                         except Exception as e:
                             logger.error(f"Unexpected error for attribute {attr}: {e}")
                             continue
+            enhanced_gen_dict[attr]['dirty'] = random.sample(enhanced_gen_dict[attr]['dirty'], len(enhanced_gen_dict[attr]['clean']))
 
     elif ENHANCED_USE and not ENHANCED_READ:
         # 改为单线程处理，便于调试
@@ -433,6 +434,10 @@ def task_gen_enhanced_data(attr, dirty_csv, index_value_label_dict, related_attr
     else:
         right_values_tmp = right_values
     
+    # 创建变量来保存这次运行生成的增强数据
+    new_clean_data = []
+    new_dirty_data = []
+    
     # 处理干净数据生成
     clean_gen_ans = ""
     if num_gen > 20:
@@ -466,6 +471,8 @@ def task_gen_enhanced_data(attr, dirty_csv, index_value_label_dict, related_attr
                     clean[-1]).strip() not in wrong_values:
                 enhanced_gen_dict[attr]['clean'].append(clean[3])
                 filtered_clean.append(clean[3])
+                # 添加到新数据列表
+                new_clean_data.append(clean[3])
         except IndexError as e:
             logger.error(f"\nError: {e}\n Handling Value: {clean}\n Processing attribute: {attr}\n")
     
@@ -507,20 +514,25 @@ def task_gen_enhanced_data(attr, dirty_csv, index_value_label_dict, related_attr
                 enhanced_gen_dict[attr]['dirty'].append(dirty[3])
                 # 将字典格式的数据添加到filtered_dirty中，保持数据类型一致
                 filtered_dirty.append(dirty[3])
+                # 添加到新数据列表
+                new_dirty_data.append(dirty[3])
         except IndexError as e:
             logger.error(f"\nError: {e}\n Handling Value: {dirty}\n Processing attribute: {attr}\n")
     
-    clean_gen_res_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_res_{attr}.txt"), 'a', encoding='utf-8')
-    for clean_dict in enhanced_gen_dict[attr]['clean']:
-        json.dump(clean_dict, clean_gen_res_file)
-        clean_gen_res_file.write('\n')
-    clean_gen_res_file.close()
+    # 只保存这次运行新生成的数据，而不是整个enhanced_gen_dict
+    if new_clean_data:
+        clean_gen_res_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_res_{attr}.txt"), 'a', encoding='utf-8')
+        for clean_dict in new_clean_data:
+            json.dump(clean_dict, clean_gen_res_file)
+            clean_gen_res_file.write('\n')
+        clean_gen_res_file.close()
     
-    dirty_gen_res_file = open(os.path.join(enhanced_gen_directory, f"dirty_gen_res_{attr}.txt"), 'a', encoding='utf-8')
-    for dirty_dict in enhanced_gen_dict[attr]['dirty']:
-        json.dump(dirty_dict, dirty_gen_res_file)
-        dirty_gen_res_file.write('\n')
-    dirty_gen_res_file.close()
+    if new_dirty_data:
+        dirty_gen_res_file = open(os.path.join(enhanced_gen_directory, f"dirty_gen_res_{attr}.txt"), 'a', encoding='utf-8')
+        for dirty_dict in new_dirty_data:
+            json.dump(dirty_dict, dirty_gen_res_file)
+            dirty_gen_res_file.write('\n')
+        dirty_gen_res_file.close()
 
 def gen_err_funcs(attr, err_gen_dict):  
     related_attrs = list(related_attrs_dict[attr])  
@@ -1299,7 +1311,7 @@ def extract_all_llm_label_res(all_attrs, error_checking_res_directory):
         content = content.replace('\\+', '').replace('\\n', '\n')
         
         # 使用正则表达式匹配每个块
-        block_pattern = r'// indices: \[(.*?)\]\s*```json\s*(\{[\s\S]*?\})\s*```'
+        block_pattern = r'// indices:\s*\[(.*?)\][\s\S]*?```json\s*(\{[\s\S]*?\})\s*```'
         blocks = re.findall(block_pattern, content, re.DOTALL)
         
         for indices_str, json_content in blocks:
@@ -1307,7 +1319,7 @@ def extract_all_llm_label_res(all_attrs, error_checking_res_directory):
                 # 解析indices列表，先去除换行符
                 indices_str_clean = indices_str.replace('\n', ' ').strip()
                 # 直接手动分割字符串，提取数字
-                indices = [int(idx.strip()) for idx in indices_str_clean.split() if idx.strip().isdigit()]
+                indices = [int(x) for x in re.findall(r'\d+', indices_str_clean)]
                 
                 # 解析JSON内容
                 json_data = json.loads(json_content)
@@ -1376,7 +1388,7 @@ def load_indices_labels(file_path):
     return save_data['indices_dict'], save_data['labels_dict']
 
 
-def label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, index_value_label_dict):
+def label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, index_value_label_dict, label_prop=True):
     """
     根据标注结果在聚类内扩散标签
     
@@ -1386,7 +1398,8 @@ def label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, index_valu
         clean_path: 清洁数据路径
         cluster_index_dict: 聚类索引字典
         index_value_label_dict: 索引值标签字典
-    
+        label_prop: 是否进行标签扩散
+
     Returns:
         det_wrong_list: 检测到的错误列表
         det_right_list: 检测到的正确列表
@@ -1402,6 +1415,8 @@ def label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, index_valu
             elif label == 0:
                 det_right_list.append((idx, attr))
     
+    if not label_prop:
+        return det_wrong_list, det_right_list
     # 然后在聚类内扩散标签
     for attr, clusters in cluster_index_dict.items():
         # 获取该属性的所有聚类中心
@@ -1561,6 +1576,7 @@ if __name__ == "__main__":
     ENHANCED_USE = config['model']['enhanced_use']
     ERR_GEN_USE = config['model']['err_gen_use']
     REL_TOP = config['model']['rel_top']
+    LABEL_PROP = config['model']['label_prop']
     ITERATIONS = config['model']['iterations']
     
     
@@ -1614,7 +1630,8 @@ if __name__ == "__main__":
             read_error_path = read_path + 'funcs'
             
             date_time = datetime.now().strftime("%m-%d")
-            resp_path = f"{base_dir}/result/{result_dir}/{date_time} {dataset}{err_rate}-{n_method}-set{set_num}-iterations{ITERATIONS}"
+            now_time = datetime.now().strftime("%H:%M")
+            resp_path = f"{base_dir}/result/{result_dir}/{date_time} {now_time} {dataset}{err_rate}-{n_method}-set{set_num}-iterations{ITERATIONS}"
             guide_directory = f'{resp_path}/guide'
             error_checking_res_directory = f'{resp_path}/error_checking'
             funcs_directory = f'{resp_path}/funcs'
@@ -1777,7 +1794,7 @@ if __name__ == "__main__":
                 para_file.write(f"{attr}: clean_data_count={clean_count}, dirty_data_count={dirty_count}\n")
             det_wrong_list, det_right_list = [], []
             with Timer('Label Propagation', logger, time_file) as t:
-                det_wrong_list, det_right_list = label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, index_value_label_dict)
+                det_wrong_list, det_right_list = label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, index_value_label_dict, LABEL_PROP)
             total_time += t.duration
             
             err_gen_dict, funcs_for_attr = {}, {}
