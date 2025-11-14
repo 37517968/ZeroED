@@ -78,13 +78,15 @@ def error_check_prompt(col_values, col_name):
     return prompt
 
 
-def create_dirty_gen_inst_prompt(clean_vals, dirty_vals, target_attribute, num_errors=20):
+def create_dirty_gen_inst_prompt(clean_vals, clean_vals_sample, dirty_vals_sample, target_attribute, num_errors=20):
     if len(clean_vals) > 0:
         temp_vals = clean_vals[0]
-    elif len(dirty_vals) > 0:
-        temp_vals = dirty_vals[0]
+    elif len(clean_vals_sample) > 0:
+        temp_vals = clean_vals_sample[0]
+    elif len(dirty_vals_sample) > 0:
+        temp_vals = dirty_vals_sample[0]
     else:
-        print(f"No vals in clean_vals and dirty_vals of attr {target_attribute}")
+        print(f"No vals in clean_vals and dirty_vals_sample of attr {target_attribute}")
         temp_vals = f"{target_attribute}: none"
     attrs = re.findall(r"'(\w+)':", str(temp_vals))
     template_dict_1 = {key: f'{key}_val_1' for key in attrs}
@@ -95,22 +97,41 @@ def create_dirty_gen_inst_prompt(clean_vals, dirty_vals, target_attribute, num_e
     prompt = f"""
 You are a data quality analyst. Your task is to inject realistic errors into clean data for the attribute `{target_attribute}`.
 
-Guidelines:
-1. If there are existing **wrong tuples** (`dirty_vals`) provided, generate new errors that are **similar in type and pattern** but **not identical** to the reference errors.
-2. Only if no reference errors are available, generate plausible real-world errors for the attribute.
-3. Preserve the general format and value type of the clean data.
-4. Output errors in the same schema as the clean values.
+You are provided with **paired examples** of:
+1. clean_vals_sample  →  correct values  
+2. dirty_vals_sample  →  erroneous versions of the corresponding clean values 
 
-Clean values for `{target_attribute}`:
-"""
-    if clean_vals:
-        prompt += f"For the attribute `{target_attribute}`, here are the given **clean** tuples to inject errors into:\n"
-        prompt += '\n'.join([str(i) for i in clean_vals]) + '\n'
-    if dirty_vals:
-        prompt += f"There are also some **wrong** tuples for reference:\n"
-        prompt += '\n'.join([str(i) for i in dirty_vals]) + '\n\n'
-    prompt += f"Please generate {num_errors} new error examples for the attribute `{target_attribute}`, following the rules above.\n"
-    prompt += f"""
+These *paired examples* demonstrate **how errors happen** for this attribute.
+Your job is NOT to repeat these errors, but to **learn the error patterns** and apply similar patterns to new clean values.
+
+### Error Pattern Learning
+Compare each `(clean_vals_sample[i], dirty_vals_sample[i])` pair and infer:
+- what kind of error occurred  
+(e.g., deletion, insertion, substitution, truncation, OCR error, swapped chars, added noise suffix, case distortion, digit-letter confusion, etc.)
+You must extract generalizable **error rules**, not specific strings.
+
+----------------------------------------------------------
+### Your Output Goal
+Given new clean values (clean_vals), generate `{num_errors}` new erroneous versions that:
+
+1. Follow the **same types of errors** learned from the sample pairs.
+2. Are **not identical** to any dirty sample.
+3. Are **not identical** to each other.
+4. Keep the original data type and general shape.
+
+----------------------------------------------------------
+### Input Clean Values To Inject Errors Into:
+{clean_vals}
+
+### Clean-Dirt Pair Examples (for learning error types):
+Clean samples:
+{clean_vals_sample}
+
+Dirty samples:
+{dirty_vals_sample}
+
+----------------------------------------------------------
+
 The output should be in the following strict format:
 ['{target_attribute}', error_value_1, Reason: 'Error type1: Specific reason', {str(template_dict_1)}]
 ['{target_attribute}', error_value_2, Reason: 'Error type2: Specific reason', {str(template_dict_2)}]
@@ -124,11 +145,9 @@ Please ensure that:
 """
     return prompt
 
-def create_clean_gen_inst_prompt(clean_vals, dirty_vals, target_attribute, num_gen=20):
+def create_clean_gen_inst_prompt(clean_vals, target_attribute, num_gen=20):
     if len(clean_vals) > 0:
         temp_vals = clean_vals[0]
-    elif len(dirty_vals) > 0:
-        temp_vals = dirty_vals[0]
     else:
         print(f"No vals in clean_vals of attr {target_attribute}")
         temp_vals = f"{target_attribute}: none"
@@ -152,9 +171,6 @@ Your task is to analyze the data and identify inner relationships. Based on this
     if clean_vals:
         prompt += f"For the attribute `{target_attribute}`, here are the given **clean** tuples as examples:\n"
         prompt += '\n'.join([str(i) for i in clean_vals]) + '\n\n'
-    if dirty_vals:
-        prompt += f"There are also some **wrong** tuples for reference:\n"
-        prompt += '\n'.join([str(i) for i in dirty_vals]) + '\n\n'
     prompt += f"Please analyze the data patterns and generate {num_gen} realistic clean values specifically for the attribute `{target_attribute}`:\n"
     prompt += f"""
 The output should be in the following strict format:

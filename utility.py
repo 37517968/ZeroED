@@ -119,7 +119,8 @@ def get_ans_from_llm(prompt, api_use=False):
             except Exception as e:
                 print(e)
     elif api_use:
-        model_type='llama-3-8b'
+        # model_type='llama-3-8b'
+        model_type='gpt-4o-mini'
         role_descr="You are a world-class data engineer, proficient in cleaning dirty data."
         api_key_list = [
             'sk-9SSJQSfSLf7aUtfTCMhCgsxiw5deylXvOUuHtPCDDB3Sa1ds'
