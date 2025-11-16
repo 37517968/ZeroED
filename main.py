@@ -572,7 +572,7 @@ def generate_enhanced_data_from_values(attr, dirty_csv, clean_csv, related_attrs
     filtered_dirty.extend(wrong_values)
     for dirty in dirty_info:
         try:
-            if len(dirty) < 4 or len(dirty[3]) == 0 or len(dirty[3].keys()) < len([attr]+related_attrs) or not isinstance(dirty[3], dict):
+            if len(dirty) < 4 or len(dirty[3]) == 0 or not isinstance(dirty[3], dict) or len(dirty[3].keys()) < len([attr]+related_attrs) :
                 continue
             if dirty[0] in all_attrs and str(dirty[-1]).strip() not in right_values and str(
                     dirty[-1]).strip() not in wrong_values:
@@ -1417,12 +1417,33 @@ def calculate_ksd(sample1, sample2):
 
 def process_select_optimal_cluster(
     enhanced_gen_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict,
-     pre_funcs_for_attr, resp_path, logger, index_value_label_dict, residual_method='both'
+     pre_funcs_for_attr, resp_path, logger, index_value_label_dict, residual_method='both',
+     previously_selected_clusters=None
 ):
     """
     从聚类结果中选出一个聚类并与增强数据合并，使其与dirty_csv的残差最小
+    
+    Args:
+        enhanced_gen_dict: 增强数据字典
+        cluster_index_dict: 聚类索引字典
+        dirty_csv: 脏数据DataFrame
+        all_attrs: 所有属性列表
+        related_attrs_dict: 相关属性字典
+        pre_funcs_for_attr: 预处理函数字典
+        resp_path: 响应路径
+        logger: 日志记录器
+        index_value_label_dict: 索引值标签字典
+        residual_method: 残差计算方法，'jsd'、'ksd'或'both'
+        previously_selected_clusters: 之前选择过的聚类，格式为 {attr: [cluster_idx1, cluster_idx2, ...]}
+    
+    Returns:
+        optimal_cluster_info_dict: 最优聚类信息字典
     """
     optimal_cluster_info_dict = {}
+    
+    # 初始化之前选择过的聚类字典
+    if previously_selected_clusters is None:
+        previously_selected_clusters = {}
     
     logger.info("开始选择最优聚类...")
     
@@ -1468,8 +1489,16 @@ def process_select_optimal_cluster(
         # 处理可能的NaN或无限值
         ref_features = np.nan_to_num(ref_features)
 
+        # 获取该属性之前选择过的聚类
+        attr_previously_selected = previously_selected_clusters.get(attr, [])
+        
         # 遍历聚类
         for cluster_idx, cluster_indices in enumerate(clusters[1:], start=0):
+            # 跳过已经选择过的聚类
+            if cluster_idx in attr_previously_selected:
+                logger.info(f"跳过属性 {attr} 的聚类 {cluster_idx}，因为之前已经选择过")
+                continue
+                
             if len(cluster_indices) == 0:
                 continue
                 
@@ -2149,6 +2178,8 @@ if __name__ == "__main__":
             index_value_label_dict = defaultdict(list)
             expert_labeled_number = 0
             num_epochs = 5000
+            # 初始化之前选择过的聚类字典
+            previously_selected_clusters = {}
 
             for i in range(iterations):
                 indices_dict = {}                
@@ -2302,7 +2333,16 @@ if __name__ == "__main__":
                 total_time += t.duration
                 if (i != iterations-1):
                     with Timer('Select Optimal Cluster', logger, time_file) as t:
-                        optimal_cluster_result = process_select_optimal_cluster(enhanced_gen_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict, pre_funcs_for_attr, resp_path, logger, index_value_label_dict, residual_method='both')
+                        optimal_cluster_result = process_select_optimal_cluster(
+                            enhanced_gen_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict, 
+                            pre_funcs_for_attr, resp_path, logger, index_value_label_dict, 
+                            residual_method='both', previously_selected_clusters=previously_selected_clusters
+                        )
+                        # 更新之前选择过的聚类字典
+                        for attr, cluster_info in optimal_cluster_result.items():
+                            if attr not in previously_selected_clusters:
+                                previously_selected_clusters[attr] = []
+                            previously_selected_clusters[attr].append(cluster_info['cluster_idx'])
                     total_time += t.duration
 
 
