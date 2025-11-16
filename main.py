@@ -324,6 +324,87 @@ def process_gen_err_data(ERR_GEN_USE, ERR_GEN_READ, read_err_gen_path, err_gen_d
             results = [executor.submit(task_gen_err_data, attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, err_gen_dict) for attr in all_attrs]
             outputs = [result.result() for result in results]
 
+def prepare_enhanced_data_values(attr, dirty_csv, clean_csv, inconsistent_index_value_label_dict, related_attrs_dict, index_value_label_dict):
+    """
+    准备用于生成增强数据的 wrong_values、right_values 和 actual_right_values
+    
+    Args:
+        attr: 属性名
+        dirty_csv: 脏数据DataFrame
+        clean_csv: 清洁数据DataFrame
+        inconsistent_index_value_label_dict: 不一致的索引值标签字典
+        related_attrs_dict: 相关属性字典
+        index_value_label_dict: 索引值标签字典
+    
+    Returns:
+        wrong_values: 错误值列表
+        right_values: 正确值列表
+        actual_right_values: 实际正确值列表
+    """
+    related_attrs = list(related_attrs_dict[attr])
+    wrong_values = []
+    right_values = []
+    actual_right_values = []
+    
+    for idx, _, label in inconsistent_index_value_label_dict[attr]:
+        if label == 1:
+            # 与clean_csv对比，确定第一个值即dirty_csv.loc[int(idx), attr]是错误的还是正确的
+            if dirty_csv.loc[int(idx), attr] != clean_csv.loc[int(idx), attr]:
+                # 如果实际是错误的，则attr的脏值合并上related_attrs的干净值加入wrong_values
+                wrong_values.append({attr: dirty_csv.loc[int(idx), attr], **clean_csv.loc[int(idx), related_attrs].to_dict()})
+                right_values.append(clean_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
+            else:
+                # 如果实际是正确的，则attr的干净值合并上related_attrs的干净值加入right_values
+                actual_right_values.append(clean_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
+                # 找到要删除的元素的索引
+                for i, (stored_idx, stored_value, stored_label) in enumerate(index_value_label_dict[attr]):
+                    if stored_idx == idx and stored_label == label:
+                        # 找到匹配的元素，现在删除它
+                        del index_value_label_dict[attr][i]
+                        # 添加新元素
+                        # 添加新元素，使用正确的字典格式
+                        index_value_label_dict[attr].append((idx, dirty_csv.loc[int(idx), [attr] + related_attrs].to_dict(), 0))
+                        break  # 找到后立即退出循环
+        elif label == 0:
+            if dirty_csv.loc[int(idx), attr] != clean_csv.loc[int(idx), attr]:
+                wrong_values.append({attr: dirty_csv.loc[int(idx), attr], **clean_csv.loc[int(idx), related_attrs].to_dict()})
+                right_values.append(clean_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
+                # 找到要删除的元素的索引
+                for i, (stored_idx, stored_value, stored_label) in enumerate(index_value_label_dict[attr]):
+                    if stored_idx == idx and stored_label == label:
+                        # 找到匹配的元素，现在删除它
+                        del index_value_label_dict[attr][i]
+                        # 添加新元素
+                        # 添加新元素，使用正确的字典格式
+                        index_value_label_dict[attr].append((idx, dirty_csv.loc[int(idx), [attr] + related_attrs].to_dict(), 0))
+                        break  # 找到后立即退出循环
+            else:
+                actual_right_values.append(clean_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
+    return wrong_values, right_values, actual_right_values
+
+def prepare_wrong_right_values(attr, current_index_value_label_dict):
+    """
+    从当前索引值标签字典中提取 wrong_values 和 right_values
+    
+    Args:
+        attr: 属性名
+        current_index_value_label_dict: 当前索引值标签字典
+    
+    Returns:
+        wrong_values: 错误值列表
+        right_values: 正确值列表
+    """
+    wrong_values = []
+    right_values = []
+    
+    for idx, value, label in current_index_value_label_dict[attr]:
+        if label == 1:
+            wrong_values.append(value)
+        elif label == 0:
+            right_values.append(value)
+    
+    return wrong_values, right_values
+
 def process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ, read_enhanced_path, enhanced_data_directory, dirty_csv, clean_csv, all_attrs, related_attrs_dict, index_value_label_dict, current_index_value_label_dict, enhanced_gen_dict, num_gen, logger):
     if ENHANCED_USE and ENHANCED_READ:
         copy_read_files_in_dir(enhanced_data_directory, read_enhanced_path)
@@ -357,7 +438,311 @@ def process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ, read_enhanced_path, e
     elif ENHANCED_USE and not ENHANCED_READ:
         # 改为单线程处理，便于调试
         for attr in all_attrs:
-            task_gen_enhanced_data(attr, dirty_csv, clean_csv, index_value_label_dict, current_index_value_label_dict, related_attrs_dict, enhanced_gen_dict, num_gen=num_gen)
+            # 准备用于生成增强数据的值
+            wrong_values, right_values, actual_right_values = prepare_enhanced_data_values(
+                attr, dirty_csv, clean_csv, current_index_value_label_dict, related_attrs_dict, index_value_label_dict
+            )
+            
+            # 调用生成增强数据的方法
+            generate_enhanced_data_from_values(
+                attr, dirty_csv, clean_csv, related_attrs_dict, enhanced_gen_dict, 
+                wrong_values, right_values, actual_right_values, num_gen
+            )
+
+def generate_enhanced_data_from_values(attr, dirty_csv, clean_csv, related_attrs_dict, enhanced_gen_dict, 
+                                      wrong_values, right_values, actual_right_values, num_gen):
+    """
+    根据提供的 wrong_values、right_values 和 actual_right_values 生成增强数据
+    
+    Args:
+        attr: 属性名
+        dirty_csv: 脏数据DataFrame
+        clean_csv: 清洁数据DataFrame
+        related_attrs_dict: 相关属性字典
+        enhanced_gen_dict: 增强数据字典
+        wrong_values: 错误值列表
+        right_values: 正确值列表
+        actual_right_values: 实际正确值列表
+        num_gen: 生成数量
+    """
+    related_attrs = list(related_attrs_dict[attr])
+    sep = "\n" + "="*40 + f" New run for attr: {attr} " + "="*40 + "\n\n"
+    clean_gen_prompt_file = open(os.path.join(enhanced_gen_directory, f"prompt_ans_clean_gen_{attr}.txt"), 'a', encoding='utf-8')
+    dirty_gen_prompt_file = open(os.path.join(enhanced_gen_directory, f"prompt_ans_dirty_gen_{attr}.txt"), 'a', encoding='utf-8')
+    clean_gen_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_{attr}.txt"), 'a', encoding='utf-8')
+    dirty_gen_file = open(os.path.join(enhanced_gen_directory, f"dirty_gen_{attr}.txt"), 'a', encoding='utf-8')
+    # 每次调用写入分隔符
+    clean_gen_prompt_file.write(sep)
+    dirty_gen_prompt_file.write(sep)
+    clean_gen_file.write(sep)
+    dirty_gen_file.write(sep)
+    
+    if len(right_values) == 0 and len(wrong_values) == 0 and len(actual_right_values) == 0:
+        logger.warning(f"No data available for attribute {attr} to generate enhanced data.")
+        return
+            
+            
+    max_vals = 20
+    if len(wrong_values) > max_vals:
+        wrong_values_tmp = wrong_values[:max_vals]
+    else:
+        wrong_values_tmp = wrong_values
+    if len(right_values) > max_vals:
+        right_values_tmp = right_values[:max_vals]
+    else:
+        right_values_tmp = right_values
+    if len(actual_right_values) > max_vals:
+        actual_right_values_tmp = actual_right_values[:max_vals]
+    else:
+        actual_right_values_tmp = (actual_right_values + right_values_tmp)[:max_vals]
+    
+    # 创建变量来保存这次运行生成的增强数据
+    new_clean_data = []
+    new_dirty_data = []
+    
+    # 处理干净数据生成
+    clean_gen_ans = ""
+    if num_gen > 15:
+        # 分批生成，每批20个
+        num_batches = (num_gen + 14) // 15  # 向上取整
+        for batch in range(num_batches):
+            batch_size = min(15, num_gen - batch * 15)
+            clean_gen_prompt = create_clean_gen_inst_prompt(actual_right_values_tmp, attr, num_gen=batch_size)
+            batch_clean_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE)
+            clean_gen_ans += batch_clean_ans + "\n\n"
+            clean_gen_prompt_file.write('*'*20 + f' batch {batch+1} prompt ' + '*'*20 + '\n' + clean_gen_prompt + '\n' + '*'*20 + f' batch {batch+1} answer ' + '*'*20 + '\n' + batch_clean_ans + '\n\n\n\n\n\n')
+    else:
+        # 一次性生成
+        clean_gen_prompt = create_clean_gen_inst_prompt(actual_right_values_tmp, attr, num_gen=num_gen)
+        clean_gen_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE)
+        clean_gen_prompt_file.write('*'*20 + ' prompt ' + '*'*20 + '\n' + clean_gen_prompt + '\n' + '*'*20 + ' answer ' + '*'*20 + '\n' + clean_gen_ans + '\n\n\n\n\n\n')
+    clean_gen_prompt_file.close()
+    clean_gen_file.write(clean_gen_ans)
+    clean_gen_file.close()
+    clean_info = extract_enhanced_info(clean_gen_ans, attr)
+
+    if (len(wrong_values_tmp) ==0):
+        logger.warning(f"No wrong values available for attribute {attr} to generate dirty data.")
+        return
+    # 处理干净数据，获取filtered_clean
+    filtered_clean = []
+    # filtered_clean.extend(right_values+actual_right_values)
+    for clean in clean_info:
+        if len(clean) < 4 or len(clean[3]) == 0 or not isinstance(clean[3], dict) or len(clean[3].keys()) < len([attr]+related_attrs) :
+            continue
+
+        try:
+            if clean[0] in all_attrs and str(clean[-1]).strip() not in right_values and str(
+                    clean[-1]).strip() not in wrong_values:
+                enhanced_gen_dict[attr]['clean'].append(clean[3])
+                filtered_clean.append(clean[3])
+                # 添加到新数据列表
+                new_clean_data.append(clean[3])
+        except IndexError as e:
+            logger.error(f"\nError: {e}\n Handling Value: {clean}\n Processing attribute: {attr}\n")
+    
+    # 处理脏数据生成（修改为对filtered_clean中的数据注入错误）
+    dirty_gen_ans = ""
+    num_dirty_to_generate = len(filtered_clean)  # 使用filtered_clean的长度作为需要生成的脏数据数量
+    
+    # 对filtered_clean分批，每批15个，注入错误
+    if num_dirty_to_generate > 15:
+        # 分批生成，每批15个
+        num_batches = (num_dirty_to_generate + 14) // 15  # 向上取整
+        for batch in range(num_batches):
+            start_idx = batch * 15
+            end_idx = min((batch + 1) * 15, num_dirty_to_generate)
+            clean_for_error_injection = filtered_clean[start_idx:end_idx]
+            
+            dirty_gen_prompt = create_dirty_gen_inst_prompt(clean_for_error_injection, right_values_tmp, wrong_values_tmp, attr, num_errors=len(clean_for_error_injection))
+            batch_dirty_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE)
+            dirty_gen_ans += batch_dirty_ans + "\n\n"
+            dirty_gen_prompt_file.write('*'*20 + f' batch {batch+1} prompt ' + '*'*20 + '\n' + dirty_gen_prompt + '\n' + '*'*20 + f' batch {batch+1} answer ' + '*'*20 + '\n' + batch_dirty_ans + '\n\n\n\n\n\n')
+    else:
+        # 一次性生成
+        dirty_gen_prompt = create_dirty_gen_inst_prompt(filtered_clean, right_values_tmp, wrong_values_tmp, attr, num_errors=num_dirty_to_generate)
+        dirty_gen_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE)
+        dirty_gen_prompt_file.write('*'*20 + ' prompt ' + '*'*20 + '\n' + dirty_gen_prompt + '\n' + '*'*20 + ' answer ' + '*'*20 + '\n' + dirty_gen_ans + '\n\n\n\n\n\n')
+    
+    dirty_gen_prompt_file.close()
+    dirty_gen_file.write(dirty_gen_ans)
+    dirty_gen_file.close()
+    dirty_info = extract_enhanced_info(dirty_gen_ans, attr)
+    filtered_dirty = []
+    filtered_dirty.extend(wrong_values)
+    for dirty in dirty_info:
+        try:
+            if len(dirty) < 4 or len(dirty[3]) == 0 or len(dirty[3].keys()) < len([attr]+related_attrs) or not isinstance(dirty[3], dict):
+                continue
+            if dirty[0] in all_attrs and str(dirty[-1]).strip() not in right_values and str(
+                    dirty[-1]).strip() not in wrong_values:
+                enhanced_gen_dict[attr]['dirty'].append(dirty[3])
+                # 将字典格式的数据添加到filtered_dirty中，保持数据类型一致
+                filtered_dirty.append(dirty[3])
+                # 添加到新数据列表
+                new_dirty_data.append(dirty[3])
+        except IndexError as e:
+            logger.error(f"\nError: {e}\n Handling Value: {dirty}\n Processing attribute: {attr}\n")
+    
+    # 只保存这次运行新生成的数据，而不是整个enhanced_gen_dict
+    if new_clean_data:
+        clean_gen_res_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_res_{attr}.txt"), 'a', encoding='utf-8')
+        for clean_dict in new_clean_data:
+            json.dump(clean_dict, clean_gen_res_file)
+            clean_gen_res_file.write('\n')
+        clean_gen_res_file.close()
+    
+    if new_dirty_data:
+        dirty_gen_res_file = open(os.path.join(enhanced_gen_directory, f"dirty_gen_res_{attr}.txt"), 'a', encoding='utf-8')
+        for dirty_dict in new_dirty_data:
+            json.dump(dirty_dict, dirty_gen_res_file)
+            dirty_gen_res_file.write('\n')
+        dirty_gen_res_file.close()
+
+def generate_enhanced_data_from_wrong_right_values(attr, dirty_csv, clean_csv, related_attrs_dict, enhanced_gen_dict, 
+                                                  wrong_values, right_values, num_gen):
+    """
+    根据提供的 wrong_values 和 right_values 生成增强数据
+    专门用于第一次迭代，不与干净数据比较
+    
+    Args:
+        attr: 属性名
+        dirty_csv: 脏数据DataFrame
+        clean_csv: 清洁数据DataFrame
+        related_attrs_dict: 相关属性字典
+        enhanced_gen_dict: 增强数据字典
+        wrong_values: 错误值列表
+        right_values: 正确值列表
+        num_gen: 生成数量
+    """
+    related_attrs = list(related_attrs_dict[attr])
+    sep = "\n" + "="*40 + f" New run for attr: {attr} " + "="*40 + "\n\n"
+    clean_gen_prompt_file = open(os.path.join(enhanced_gen_directory, f"prompt_ans_clean_gen_{attr}.txt"), 'a', encoding='utf-8')
+    dirty_gen_prompt_file = open(os.path.join(enhanced_gen_directory, f"prompt_ans_dirty_gen_{attr}.txt"), 'a', encoding='utf-8')
+    clean_gen_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_{attr}.txt"), 'a', encoding='utf-8')
+    dirty_gen_file = open(os.path.join(enhanced_gen_directory, f"dirty_gen_{attr}.txt"), 'a', encoding='utf-8')
+    # 每次调用写入分隔符
+    clean_gen_prompt_file.write(sep)
+    dirty_gen_prompt_file.write(sep)
+    clean_gen_file.write(sep)
+    dirty_gen_file.write(sep)
+    
+    if len(right_values) == 0 and len(wrong_values) == 0:
+        logger.warning(f"No data available for attribute {attr} to generate enhanced data.")
+        return
+            
+            
+    max_vals = 20
+    if len(wrong_values) > max_vals:
+        wrong_values_tmp = wrong_values[:max_vals]
+    else:
+        wrong_values_tmp = wrong_values
+    if len(right_values) > max_vals:
+        right_values_tmp = right_values[:max_vals]
+    else:
+        right_values_tmp = right_values
+    
+    # 创建变量来保存这次运行生成的增强数据
+    new_clean_data = []
+    new_dirty_data = []
+    
+    # 处理干净数据生成 - 使用right_values生成干净数据
+    clean_gen_ans = ""
+    if num_gen > 15:
+        # 分批生成，每批20个
+        num_batches = (num_gen + 14) // 15  # 向上取整
+        for batch in range(num_batches):
+            batch_size = min(15, num_gen - batch * 15)
+            clean_gen_prompt = create_clean_gen_inst_prompt(right_values_tmp, attr, num_gen=batch_size)
+            batch_clean_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE)
+            clean_gen_ans += batch_clean_ans + "\n\n"
+            clean_gen_prompt_file.write('*'*20 + f' batch {batch+1} prompt ' + '*'*20 + '\n' + clean_gen_prompt + '\n' + '*'*20 + f' batch {batch+1} answer ' + '*'*20 + '\n' + batch_clean_ans + '\n\n\n\n\n\n')
+    else:
+        # 一次性生成
+        clean_gen_prompt = create_clean_gen_inst_prompt(right_values_tmp, attr, num_gen=num_gen)
+        clean_gen_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE)
+        clean_gen_prompt_file.write('*'*20 + ' prompt ' + '*'*20 + '\n' + clean_gen_prompt + '\n' + '*'*20 + ' answer ' + '*'*20 + '\n' + clean_gen_ans + '\n\n\n\n\n\n')
+    clean_gen_prompt_file.close()
+    clean_gen_file.write(clean_gen_ans)
+    clean_gen_file.close()
+    clean_info = extract_enhanced_info(clean_gen_ans, attr)
+
+    if (len(wrong_values_tmp) ==0):
+        logger.warning(f"No wrong values available for attribute {attr} to generate dirty data.")
+        return
+    # 处理干净数据，获取filtered_clean
+    filtered_clean = []
+    for clean in clean_info:
+        if len(clean) < 4 or len(clean[3]) == 0 or not isinstance(clean[3], dict) or len(clean[3].keys()) < len([attr]+related_attrs) :
+            continue
+
+        try:
+            if clean[0] in all_attrs and str(clean[-1]).strip() not in right_values and str(
+                    clean[-1]).strip() not in wrong_values:
+                enhanced_gen_dict[attr]['clean'].append(clean[3])
+                filtered_clean.append(clean[3])
+                # 添加到新数据列表
+                new_clean_data.append(clean[3])
+        except IndexError as e:
+            logger.error(f"\nError: {e}\n Handling Value: {clean}\n Processing attribute: {attr}\n")
+    
+    # 处理脏数据生成（修改为对filtered_clean中的数据注入错误）
+    dirty_gen_ans = ""
+    num_dirty_to_generate = len(filtered_clean)  # 使用filtered_clean的长度作为需要生成的脏数据数量
+    
+    # 对filtered_clean分批，每批15个，注入错误
+    if num_dirty_to_generate > 15:
+        # 分批生成，每批15个
+        num_batches = (num_dirty_to_generate + 14) // 15  # 向上取整
+        for batch in range(num_batches):
+            start_idx = batch * 15
+            end_idx = min((batch + 1) * 15, num_dirty_to_generate)
+            clean_for_error_injection = filtered_clean[start_idx:end_idx]
+            
+            dirty_gen_prompt = create_dirty_gen_inst_prompt(clean_for_error_injection, right_values_tmp, wrong_values_tmp, attr, num_errors=len(clean_for_error_injection))
+            batch_dirty_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE)
+            dirty_gen_ans += batch_dirty_ans + "\n\n"
+            dirty_gen_prompt_file.write('*'*20 + f' batch {batch+1} prompt ' + '*'*20 + '\n' + dirty_gen_prompt + '\n' + '*'*20 + f' batch {batch+1} answer ' + '*'*20 + '\n' + batch_dirty_ans + '\n\n\n\n\n\n')
+    else:
+        # 一次性生成
+        dirty_gen_prompt = create_dirty_gen_inst_prompt(filtered_clean, right_values_tmp, wrong_values_tmp, attr, num_errors=num_dirty_to_generate)
+        dirty_gen_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE)
+        dirty_gen_prompt_file.write('*'*20 + ' prompt ' + '*'*20 + '\n' + dirty_gen_prompt + '\n' + '*'*20 + ' answer ' + '*'*20 + '\n' + dirty_gen_ans + '\n\n\n\n\n\n')
+    
+    dirty_gen_prompt_file.close()
+    dirty_gen_file.write(dirty_gen_ans)
+    dirty_gen_file.close()
+    dirty_info = extract_enhanced_info(dirty_gen_ans, attr)
+    filtered_dirty = []
+    filtered_dirty.extend(wrong_values)
+    for dirty in dirty_info:
+        try:
+            if len(dirty) < 4 or len(dirty[3]) == 0 or not isinstance(dirty[3], dict) or len(dirty[3].keys()) < len([attr]+related_attrs) :
+                continue
+            if dirty[0] in all_attrs and str(dirty[-1]).strip() not in right_values and str(
+                    dirty[-1]).strip() not in wrong_values:
+                enhanced_gen_dict[attr]['dirty'].append(dirty[3])
+                # 将字典格式的数据添加到filtered_dirty中，保持数据类型一致
+                filtered_dirty.append(dirty[3])
+                # 添加到新数据列表
+                new_dirty_data.append(dirty[3])
+        except IndexError as e:
+            logger.error(f"\nError: {e}\n Handling Value: {dirty}\n Processing attribute: {attr}\n")
+    
+    # 只保存这次运行新生成的数据，而不是整个enhanced_gen_dict
+    if new_clean_data:
+        clean_gen_res_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_res_{attr}.txt"), 'a', encoding='utf-8')
+        for clean_dict in new_clean_data:
+            json.dump(clean_dict, clean_gen_res_file)
+            clean_gen_res_file.write('\n')
+        clean_gen_res_file.close()
+    
+    if new_dirty_data:
+        dirty_gen_res_file = open(os.path.join(enhanced_gen_directory, f"dirty_gen_res_{attr}.txt"), 'a', encoding='utf-8')
+        for dirty_dict in new_dirty_data:
+            json.dump(dirty_dict, dirty_gen_res_file)
+            dirty_gen_res_file.write('\n')
+        dirty_gen_res_file.close()
 
 def task_gen_err_data(attr, dirty_csv, index_value_label_dict, related_attrs_dict, err_gen_dict):
     related_attrs = list(related_attrs_dict[attr]) 
@@ -1416,6 +1801,35 @@ def load_indices_labels(file_path):
     
     return save_data['indices_dict'], save_data['labels_dict']
 
+def compare_llm_and_classifier_labels(current_index_value_label_dict, det_wrong_list_res):
+    """
+    比较LLM标注结果和分类器标注结果，复制current_index_value_label_dict中和模型标注不一致的数据
+    
+    Args:
+        current_index_value_label_dict: LLM标注结果，格式为 {attr: [(idx, value, label), ...]}
+        det_wrong_list_res: 分类器标注结果，格式为 [(idx, attr), ...]
+    
+    Returns:
+        inconsistent_index_value_label_dict: 与模型标注不一致的数据，格式与current_index_value_label_dict相同
+    """
+    inconsistent_index_value_label_dict = defaultdict(list)
+    
+    # 将分类器标注结果转换为字典格式，方便查找
+    classifier_labels = {}
+    for idx, attr in det_wrong_list_res:
+        classifier_labels[(idx, attr)] = 1  # 1表示分类器认为这是错误的
+    
+    # 遍历LLM标注结果
+    for attr, label_list in current_index_value_label_dict.items():
+        for idx, value, llm_label in label_list:
+            # 获取分类器对该单元格的标注
+            classifier_label = classifier_labels.get((idx, attr), 0)  # 默认为0（正确）
+            
+            # 比较标注结果，如果不一致则添加到结果中
+            if llm_label != classifier_label:
+                inconsistent_index_value_label_dict[attr].append((idx, value, llm_label))
+    
+    return inconsistent_index_value_label_dict
 
 def label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, index_value_label_dict, label_prop=True):
     """
@@ -1733,11 +2147,11 @@ if __name__ == "__main__":
             labeled_number = 0
             # 初始化index_value_label_dict
             index_value_label_dict = defaultdict(list)
-
             expert_labeled_number = 0
+            num_epochs = 5000
+
             for i in range(iterations):
-                indices_dict = {}
-                
+                indices_dict = {}                
                 # 准备indices字典
                 if i == 0:
                     # 第一次迭代使用聚类中心indices
@@ -1748,24 +2162,20 @@ if __name__ == "__main__":
                 
                 # 计算当前迭代的实际标注数量（过滤掉已标注的索引后）
                 unlabeled_indices_dict = {}
-                current_labeled_number = 0
-                
+                current_labeled_number = 0                
                 for attr_name, indices in indices_dict.items():
                     # 获取该属性的未标注索引
                     if index_value_label_dict and attr_name in index_value_label_dict:
                         labeled_indices = {idx for idx, _, _ in index_value_label_dict[attr_name]}
                         unlabeled_indices = [idx for idx in indices if idx not in labeled_indices]
                     else:
-                        unlabeled_indices = indices[:]
-                    
+                        unlabeled_indices = indices[:]                    
                     # 限制标注数量：超过30个随机抽取30个，否则全部标注
                     if i!=0:
                         if len(unlabeled_indices) > 30:
-                            unlabeled_indices = random.sample(list(unlabeled_indices), 30)
-                    
+                            unlabeled_indices = random.sample(list(unlabeled_indices), 30)                    
                     unlabeled_indices_dict[attr_name] = unlabeled_indices
-                    current_labeled_number += len(unlabeled_indices)
-                
+                    current_labeled_number += len(unlabeled_indices)                
                 labeled_number += current_labeled_number
                 
                 with Timer('LLM Labeling', logger, time_file) as t:
@@ -1788,6 +2198,36 @@ if __name__ == "__main__":
                         center_index_value_label_dict = current_index_value_label_dict
                 total_time += t.duration
                 
+                if i != 0:
+                    # 用标注数据和增强数据训练模型并检测前面LLM标注不一致的数据用于后续数据的增强
+                    feat_dict_train = {}
+                    label_dict_train = {}
+                    for attr in all_attrs:
+                        # 在第一次迭代时，det_wrong_list和det_right_list为空，所以使用空列表
+                        attr, feature_list, label_list = process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, enhanced_gen_dict, funcs_for_attr, feature_all_dict, resp_path)
+                        feat_dict_train[attr] = feature_list
+                        label_dict_train[attr] = label_list
+                    
+                    model_col = {}
+                    
+                    for attr in tqdm(all_attrs, desc="Training models", ncols=120):
+                        attr, model, learning_rate, optimizer, model_str, epoch = train_model(attr, feat_dict_train[attr], label_dict_train[attr], num_epochs)
+                        if model is not None:
+                            model_col[attr] = model
+                            
+                    logger.info('Finish Generating Features & Training Models')
+                    det_wrong_list_res = []
+                    
+                    for col, attr in tqdm(enumerate(all_attrs), desc="Making predictions", ncols=120):
+                        wrong_cells = make_predictions(col, attr, dirty_csv, model_col, related_attrs_dict, funcs_for_attr, feature_all_dict, resp_path)
+                        for cell in wrong_cells:
+                            if cell not in det_wrong_list_res:
+                                det_wrong_list_res.append(cell)
+                    
+                    # 比较LLM标注结果和分类器标注结果，找出标注不一致的索引
+                    inconsistent_index_value_label_dict = compare_llm_and_classifier_labels(current_index_value_label_dict, det_wrong_list_res)
+                    
+
                 # 将当前迭代的标注结果累积到总结果中
                 for attr, label_list in current_index_value_label_dict.items():
                     # 创建一个集合来跟踪已经添加的索引，避免重复
@@ -1803,22 +2243,61 @@ if __name__ == "__main__":
                     measure_status = measure_llm_label(resp_path, clean_csv, all_attrs, related_attrs_dict, gt_wrong_dict, index_value_label_dict)
                 total_time += t.duration
 
-                # 如果是第一次迭代，初始化enhanced_gen_dict
-                if i == 0:
-                    enhanced_gen_dict = defaultdict(default_dict_of_lists)
+                
+                
+                # 初始化det_wrong_list和det_right_list
+                det_wrong_list = []
+                det_right_list = []
+                for attr, label_list in index_value_label_dict.items():
+                    for idx, value, label in label_list:
+                        if label == 1:
+                            det_wrong_list.append((idx, attr))
+                        elif label == 0:
+                            det_right_list.append((idx, attr))
+                
+                if (i == 0):
+                    err_gen_dict, funcs_for_attr = {}, {}
+                    with Timer('Generating Functions', logger, time_file) as t:
+                        err_gen_dict, funcs_for_attr = process_gen_err_funcs(FUNC_USE, FUNC_READ, read_path, read_func_path, read_error_path, resp_path, funcs_directory, dirty_csv, all_attrs, para_file, related_attrs_dict, center_index_value_label_dict, det_wrong_list, det_right_list)
+                    total_time += t.duration
+                
+
                 with Timer('Generating Enhanced Data', logger, time_file) as t:
-                    process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ,  read_enhanced_path, enhanced_gen_directory, dirty_csv, clean_csv, all_attrs, related_attrs_dict, index_value_label_dict, current_index_value_label_dict, enhanced_gen_dict, 15, logger)
-                
-                # 计算并记录current_index_value_label_dict中被标注为错误的数据数量
-                expert_labeled_number = 0
-                for attr in all_attrs:
-                    if attr in current_index_value_label_dict:
-                        for idx, _, label in current_index_value_label_dict[attr]:
-                            if label == 1:
-                                expert_labeled_number += 1
-                
-                # 记录到参数文件
-                para_file.write(f"第 {i+1} 次迭代中专家标注的数量: {expert_labeled_number}\n")
+                    # 如果是第一次迭代，初始化enhanced_gen_dict
+                    if i == 0:
+                        enhanced_gen_dict = defaultdict(default_dict_of_lists)
+                        # 用这些标注的聚类中心增强数据，使用wrong_values和right_values
+                        for attr in all_attrs:
+                            # 从current_index_value_label_dict获取wrong_values和right_values
+                            wrong_values, right_values = prepare_wrong_right_values(attr, current_index_value_label_dict)
+                            
+                            # 调用生成增强数据的方法
+                            generate_enhanced_data_from_wrong_right_values(
+                                attr, dirty_csv, clean_csv, related_attrs_dict, enhanced_gen_dict, 
+                                wrong_values, right_values, 15
+                            )
+                    else:
+                        # 在主循环的else分支下获取wrong_values、right_values和actual_right_values
+                        for attr in all_attrs:
+                            wrong_values, right_values, actual_right_values = prepare_enhanced_data_values(
+                                attr, dirty_csv, clean_csv, inconsistent_index_value_label_dict, related_attrs_dict, index_value_label_dict
+                            )
+                            
+                            # 调用生成增强数据的方法
+                            generate_enhanced_data_from_values(
+                                attr, dirty_csv, clean_csv, related_attrs_dict, enhanced_gen_dict, 
+                                wrong_values, right_values, actual_right_values, 15
+                            )
+
+
+                # 计算并记录inconsistent_index_value_label_dict中被标注为错误的数据数量
+                if (i != 0):
+                    expert_labeled_number = 0
+                    for attr in all_attrs:
+                        if attr in inconsistent_index_value_label_dict:
+                            expert_labeled_number += len(inconsistent_index_value_label_dict[attr])
+                    # 记录到参数文件
+                    para_file.write(f"第 {i+1} 次迭代中专家标注的数量: {expert_labeled_number}\n")
 
                 total_time += t.duration
                 if (i != iterations-1):
@@ -1835,22 +2314,18 @@ if __name__ == "__main__":
                 clean_count = len(data['clean'])
                 dirty_count = len(data['dirty'])
                 para_file.write(f"{attr}: clean_data_count={clean_count}, dirty_data_count={dirty_count}\n")
-            det_wrong_list, det_right_list = [], []
             with Timer('Label Propagation', logger, time_file) as t:
                 det_wrong_list, det_right_list = label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, index_value_label_dict, LABEL_PROP)
             total_time += t.duration
             
-            err_gen_dict, funcs_for_attr = {}, {}
-            with Timer('Generating Functions', logger, time_file) as t:
-                err_gen_dict, funcs_for_attr = process_gen_err_funcs(FUNC_USE, FUNC_READ, read_path, read_func_path, read_error_path, resp_path, funcs_directory, dirty_csv, all_attrs, para_file, related_attrs_dict, center_index_value_label_dict, det_wrong_list, det_right_list)
-            total_time += t.duration
+            
 
             feature_all_dict = None
             if os.path.exists(os.path.join(resp_path, f'cluster_feat_dict.pkl')):
                 with open(os.path.join(resp_path, f'cluster_feat_dict.pkl'), 'rb') as f:
                     feature_all_dict = pickle.load(f)
                     
-            num_epochs = 5000
+            
             logger.info('Start Training Local Models')
             time_start = time.time()
             # 改为单线程处理
@@ -1870,16 +2345,16 @@ if __name__ == "__main__":
                     
             logger.info('Finish Generating Features & Training Models')
             para_file.close()
-            det_wrong_list = []
+            det_wrong_list_res = []
             
             for col, attr in tqdm(enumerate(all_attrs), desc="Making predictions", ncols=120):
                 wrong_cells = make_predictions(col, attr, dirty_csv, model_col, related_attrs_dict, funcs_for_attr, feature_all_dict, resp_path)
                 for cell in wrong_cells:
-                    if cell not in det_wrong_list:
-                        det_wrong_list.append(cell)
+                    if cell not in det_wrong_list_res:
+                        det_wrong_list_res.append(cell)
                         
             det_res_path = os.path.join(resp_path, "func_det_res.txt")
-            measure_detect(clean_path, dirty_path, list(det_wrong_list), det_res_path)
+            measure_detect(clean_path, dirty_path, list(det_wrong_list_res), det_res_path)
             time_end = time.time()
             logger.info(f'Finish Local Model Training and Prediction, Using {time_end - time_start}s')
             total_time += time_end - time_start
