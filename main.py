@@ -355,7 +355,7 @@ def prepare_enhanced_data_values(attr, dirty_csv, clean_csv, inconsistent_index_
                 right_values.append(clean_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
             else:
                 # 如果实际是正确的，则attr的干净值合并上related_attrs的干净值加入right_values
-                actual_right_values.append(clean_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
+                actual_right_values.append(dirty_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
                 # 找到要删除的元素的索引
                 for i, (stored_idx, stored_value, stored_label) in enumerate(index_value_label_dict[attr]):
                     if stored_idx == idx and stored_label == label:
@@ -367,7 +367,7 @@ def prepare_enhanced_data_values(attr, dirty_csv, clean_csv, inconsistent_index_
                         break  # 找到后立即退出循环
         elif label == 0:
             if dirty_csv.loc[int(idx), attr] != clean_csv.loc[int(idx), attr]:
-                wrong_values.append({attr: dirty_csv.loc[int(idx), attr], **clean_csv.loc[int(idx), related_attrs].to_dict()})
+                wrong_values.append(dirty_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
                 right_values.append(clean_csv.loc[int(idx), [attr] + related_attrs ].to_dict())
                 # 找到要删除的元素的索引
                 for i, (stored_idx, stored_value, stored_label) in enumerate(index_value_label_dict[attr]):
@@ -449,15 +449,13 @@ def process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ, read_enhanced_path, e
                 wrong_values, right_values, actual_right_values, num_gen
             )
 
-def generate_enhanced_data_from_values(attr, dirty_csv, clean_csv, related_attrs_dict, enhanced_gen_dict, 
+def generate_enhanced_data_from_values(attr, related_attrs_dict, enhanced_gen_dict, 
                                       wrong_values, right_values, actual_right_values, num_gen):
     """
     根据提供的 wrong_values、right_values 和 actual_right_values 生成增强数据
     
     Args:
         attr: 属性名
-        dirty_csv: 脏数据DataFrame
-        clean_csv: 清洁数据DataFrame
         related_attrs_dict: 相关属性字典
         enhanced_gen_dict: 增强数据字典
         wrong_values: 错误值列表
@@ -526,7 +524,7 @@ def generate_enhanced_data_from_values(attr, dirty_csv, clean_csv, related_attrs
         return
     # 处理干净数据，获取filtered_clean
     filtered_clean = []
-    # filtered_clean.extend(right_values+actual_right_values)
+    filtered_clean.extend(right_values+actual_right_values)
     for clean in clean_info:
         if len(clean) < 4 or len(clean[3]) == 0 or not isinstance(clean[3], dict) or len(clean[3].keys()) < len([attr]+related_attrs) :
             continue
@@ -1860,6 +1858,112 @@ def compare_llm_and_classifier_labels(current_index_value_label_dict, det_wrong_
     
     return inconsistent_index_value_label_dict
 
+def print_prediction_errors(dirty_csv, clean_csv, det_wrong_list_res, all_attrs, related_attrs_dict, logger):
+    """
+    打印预测错误的数据，包括没有找到的错误和将正确值误判为错误的值，
+    同时打印干净值和脏值的对照，每个单元格值包含其他列作为上下文
+    
+    Args:
+        dirty_csv: 脏数据DataFrame
+        clean_csv: 清洁数据DataFrame
+        det_wrong_list_res: 检测到的错误列表，格式为 [(idx, attr), ...]
+        all_attrs: 所有属性列表
+        related_attrs_dict: 相关属性字典
+        logger: 日志记录器
+    """
+    
+    # 1. 找出模型预测为错误但实际上是正确的数据（误报）
+    false_positives = []
+    for idx, attr in det_wrong_list_res:
+        # 检查这个单元格在脏数据和清洁数据中是否相同
+        if str(dirty_csv.loc[idx, attr]) == str(clean_csv.loc[idx, attr]):
+            false_positives.append((idx, attr))
+    
+    # 2. 找出模型没有预测到但实际上是错误的数据（漏报）
+    false_negatives = []
+    for attr in all_attrs:
+        related_attrs = list(related_attrs_dict[attr])
+        for idx in range(len(dirty_csv)):
+            # 检查这个单元格在脏数据和清洁数据中是否不同
+            if str(dirty_csv.loc[idx, attr]) != str(clean_csv.loc[idx, attr]):
+                # 检查这个单元格是否没有被检测为错误
+                if (idx, attr) not in det_wrong_list_res:
+                    false_negatives.append((idx, attr))
+    
+    # 打印误报数据
+    logger.info(f"\n误报数据（模型预测为错误但实际上是正确的）: {len(false_positives)} 个")
+    for idx, attr in false_positives[:10]:  # 只打印前10个
+        related_attrs = list(related_attrs_dict[attr])
+        dirty_value = dirty_csv.loc[idx, attr]
+        clean_value = clean_csv.loc[idx, attr]
+        
+        # 获取相关列的上下文
+        context = dirty_csv.loc[idx, related_attrs].to_dict() if related_attrs else {}
+    for idx, attr in false_negatives[:10]:  # 只打印前10个
+        related_attrs = list(related_attrs_dict[attr])
+        dirty_value = dirty_csv.loc[idx, attr]
+        clean_value = clean_csv.loc[idx, attr]
+        
+        # 获取相关列的上下文
+        context = dirty_csv.loc[idx, related_attrs].to_dict() if related_attrs else {}
+    
+    # 计算并打印统计信息
+    total_errors = 0
+    for attr in all_attrs:
+        for idx in range(len(dirty_csv)):
+            if str(dirty_csv.loc[idx, attr]) != str(clean_csv.loc[idx, attr]):
+                total_errors += 1
+    
+    detected_errors = len(det_wrong_list_res)
+    missed_errors = len(false_negatives)
+    false_positive_rate = len(false_positives) / len(det_wrong_list_res) if det_wrong_list_res else 0
+    false_negative_rate = missed_errors / total_errors if total_errors else 0
+    precision = (detected_errors - len(false_positives)) / detected_errors if detected_errors else 0
+    recall = (detected_errors - len(false_positives)) / total_errors if total_errors else 0
+    f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+    
+    # 将详细错误信息保存到文件
+    error_detail_file = os.path.join(resp_path, "prediction_error_details.txt")
+    with open(error_detail_file, 'w', encoding='utf-8') as f:
+        f.write("="*50 + " 预测错误数据分析 " + "="*50 + "\n\n")
+        
+        f.write(f"误报数据（模型预测为错误但实际上是正确的）: {len(false_positives)} 个\n\n")
+        for idx, attr in false_positives:
+            related_attrs = list(related_attrs_dict[attr])
+            dirty_value = dirty_csv.loc[idx, attr]
+            clean_value = clean_csv.loc[idx, attr]
+            context = dirty_csv.loc[idx, related_attrs].to_dict() if related_attrs else {}
+            
+            f.write(f"误报 - 行 {idx}, 列 {attr}:\n")
+            f.write(f"  脏值: {dirty_value}\n")
+            f.write(f"  清洁值: {clean_value}\n")
+            f.write(f"  上下文: {context}\n\n")
+        
+        f.write(f"\n漏报数据（模型没有预测到但实际上是错误的）: {len(false_negatives)} 个\n\n")
+        for idx, attr in false_negatives:
+            related_attrs = list(related_attrs_dict[attr])
+            dirty_value = dirty_csv.loc[idx, attr]
+            clean_value = clean_csv.loc[idx, attr]
+            context = dirty_csv.loc[idx, related_attrs].to_dict() if related_attrs else {}
+            
+            f.write(f"漏报 - 行 {idx}, 列 {attr}:\n")
+            f.write(f"  脏值: {dirty_value}\n")
+            f.write(f"  清洁值: {clean_value}\n")
+            f.write(f"  上下文: {context}\n\n")
+        
+        f.write("\n" + "="*50 + " 预测性能统计 " + "="*50 + "\n")
+        f.write(f"总错误数: {total_errors}\n")
+        f.write(f"检测到的错误数: {detected_errors}\n")
+        f.write(f"误报数: {len(false_positives)}\n")
+        f.write(f"漏报数: {missed_errors}\n")
+        f.write(f"误报率: {false_positive_rate:.4f}\n")
+        f.write(f"漏报率: {false_negative_rate:.4f}\n")
+        f.write(f"精确率: {precision:.4f}\n")
+        f.write(f"召回率: {recall:.4f}\n")
+        f.write(f"F1分数: {f1_score:.4f}\n")
+    
+    logger.info(f"\n详细的错误信息已保存到: {error_detail_file}")
+
 def label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, index_value_label_dict, label_prop=True):
     """
     根据标注结果在聚类内扩散标签
@@ -2298,15 +2402,14 @@ if __name__ == "__main__":
                     if i == 0:
                         enhanced_gen_dict = defaultdict(default_dict_of_lists)
                         # 用这些标注的聚类中心增强数据，使用wrong_values和right_values
-                        for attr in all_attrs:
-                            # 从current_index_value_label_dict获取wrong_values和right_values
-                            wrong_values, right_values = prepare_wrong_right_values(attr, current_index_value_label_dict)
-                            
-                            # 调用生成增强数据的方法
-                            generate_enhanced_data_from_wrong_right_values(
-                                attr, dirty_csv, clean_csv, related_attrs_dict, enhanced_gen_dict, 
-                                wrong_values, right_values, 15
-                            )
+                        # for attr in all_attrs:
+                        #     # 从current_index_value_label_dict获取wrong_values和right_values
+                        #     wrong_values, right_values = prepare_wrong_right_values(attr, current_index_value_label_dict)
+                        #     # 调用生成增强数据的方法
+                        #     generate_enhanced_data_from_wrong_right_values(
+                        #         attr, dirty_csv, clean_csv, related_attrs_dict, enhanced_gen_dict, 
+                        #         wrong_values, right_values, 15
+                        #     )
                     else:
                         # 在主循环的else分支下获取wrong_values、right_values和actual_right_values
                         for attr in all_attrs:
@@ -2316,8 +2419,8 @@ if __name__ == "__main__":
                             
                             # 调用生成增强数据的方法
                             generate_enhanced_data_from_values(
-                                attr, dirty_csv, clean_csv, related_attrs_dict, enhanced_gen_dict, 
-                                wrong_values, right_values, actual_right_values, 15
+                                attr, related_attrs_dict, enhanced_gen_dict, 
+                                wrong_values, right_values, actual_right_values, 30
                             )
 
 
@@ -2400,5 +2503,7 @@ if __name__ == "__main__":
             total_time += time_end - time_start
             time_file.write(f"model_training: {time_end - time_start}\n")
             time_file.write(f"total: {total_time}\n")
+        # 调用函数打印预测错误数据
+        print_prediction_errors(dirty_csv, clean_csv, det_wrong_list_res, all_attrs, related_attrs_dict, logger)
         time_file.close()
         para_file.close()

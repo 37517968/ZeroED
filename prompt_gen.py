@@ -118,6 +118,7 @@ Given new clean values (clean_vals), generate `{num_errors}` new erroneous versi
 2. Are **not identical** to any dirty sample.
 3. Are **not identical** to each other.
 4. Keep the original data type and general shape.
+5. Ensure that every error type inferred from the clean–dirty sample pairs is used at least once across the generated outputs.
 
 ----------------------------------------------------------
 ### Input Clean Values To Inject Errors Into:
