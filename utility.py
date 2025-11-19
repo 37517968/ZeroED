@@ -139,7 +139,7 @@ def get_ans_from_llm(prompt, api_use=False):
                 )
                 completion_res = client.chat.completions.create(
                     model=model_type,
-                    temperature=0.6,
+                    temperature=0,
                     messages=[
                         {"role": "system",
                         "content": role_descr},
