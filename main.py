@@ -1,5 +1,6 @@
 import argparse
 import ast
+from contextlib import nullcontext
 import json
 import multiprocessing
 import os
@@ -323,6 +324,132 @@ def process_gen_err_data(ERR_GEN_USE, ERR_GEN_READ, read_err_gen_path, err_gen_d
         with ThreadPoolExecutor(max_workers=2*os.cpu_count()) as executor:
             results = [executor.submit(task_gen_err_data, attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, err_gen_dict) for attr in all_attrs]
             outputs = [result.result() for result in results]
+
+def save_expert_labeled_data(wrong_values, right_values, actual_right_values, resp_path):
+    """
+    保存专家标注数据到文件
+    
+    Args:
+        wrong_values: 错误值列表
+        right_values: 正确值列表
+        actual_right_values: 实际正确值列表
+        resp_path: 响应路径
+    """
+    # 保存wrong_values到expert_labled_wrong_values.txt
+    if wrong_values:
+        wrong_values_file = open(os.path.join(resp_path, 'expert_labled_wrong_values.txt'), 'a', encoding='utf-8')
+        for value in wrong_values:
+            json.dump(value, wrong_values_file)
+            wrong_values_file.write('\n')
+        wrong_values_file.close()
+    
+    # 保存right_values和actual_right_values到expert_labled_right_values.txt
+    right_values_file = open(os.path.join(resp_path, 'expert_labled_right_values.txt'), 'a', encoding='utf-8')
+    for value in right_values:
+        json.dump(value, right_values_file)
+        right_values_file.write('\n')
+    for value in actual_right_values:
+        json.dump(value, right_values_file)
+        right_values_file.write('\n')
+    right_values_file.close()
+
+
+def load_expert_labeled_data(resp_path):
+    """
+    从文件加载专家标注数据
+    
+    Args:
+        resp_path: 响应路径
+    
+    Returns:
+        expert_wrong_values: 专家标注的错误值列表
+        expert_right_values: 专家标注的正确值列表
+    """
+    expert_wrong_values = []
+    expert_right_values = []
+    
+    # 从expert_labled_wrong_values.txt加载wrong_values
+    wrong_values_path = os.path.join(resp_path, 'expert_labled_wrong_values.txt')
+    if os.path.exists(wrong_values_path):
+        with open(wrong_values_path, 'r', encoding='utf-8') as file:
+            for line in file:
+                try:
+                    expert_wrong_values.append(json.loads(line.strip()))
+                except json.JSONDecodeError as e:
+                    print(f"Error parsing JSON in expert_labled_wrong_values.txt: {e}")
+                    continue
+    
+    # 从expert_labled_right_values.txt加载right_values
+    right_values_path = os.path.join(resp_path, 'expert_labled_right_values.txt')
+    if os.path.exists(right_values_path):
+        with open(right_values_path, 'r', encoding='utf-8') as file:
+            for line in file:
+                try:
+                    expert_right_values.append(json.loads(line.strip()))
+                except json.JSONDecodeError as e:
+                    print(f"Error parsing JSON in expert_labled_right_values.txt: {e}")
+                    continue
+    
+    return expert_wrong_values, expert_right_values
+def remove_expert_labeled_indices(current_index_value_label_dict, resp_path):
+    """
+    删除current_index_value_label_dict中在expert_labeled_indices文件出现的索引
+    
+    Args:
+        current_index_value_label_dict: 当前索引值标签字典
+        resp_path: 响应路径
+    
+    Returns:
+        更新后的current_index_value_label_dict
+    """
+    expert_labeled_indices_path = os.path.join(resp_path, 'expert_labeled_indices.txt')
+    if os.path.exists(expert_labeled_indices_path):
+        with open(expert_labeled_indices_path, 'r', encoding='utf-8') as f:
+            expert_labeled_indices = set()
+            for line in f:
+                try:
+                    data = json.loads(line.strip())
+                    if isinstance(data, dict) and 'index' in data:
+                        expert_labeled_indices.add(data['index'])
+                    elif isinstance(data, int):
+                        expert_labeled_indices.add(data)
+                except json.JSONDecodeError:
+                    continue
+        
+        # 从current_index_value_label_dict中删除在expert_labeled_indices中出现的索引
+        for attr in current_index_value_label_dict:
+            current_index_value_label_dict[attr] = [
+                (idx, value, label) for idx, value, label in current_index_value_label_dict[attr]
+                if idx not in expert_labeled_indices
+            ]
+    
+    return current_index_value_label_dict
+
+
+def save_inconsistent_indices(inconsistent_index_value_label_dict, resp_path):
+    """
+    将不一致的标注索引保存到expert_labeled_indices文件中
+    
+    Args:
+        inconsistent_index_value_label_dict: 不一致的索引值标签字典
+        resp_path: 响应路径
+    """
+    expert_labeled_indices_path = os.path.join(resp_path, 'expert_labeled_indices.txt')
+    
+    # 以追加模式打开文件，如果文件不存在则创建
+    with open(expert_labeled_indices_path, 'a', encoding='utf-8') as f:
+        for attr, label_list in inconsistent_index_value_label_dict.items():
+            for idx, value, label in label_list:
+                # 保存索引和相关信息
+                index_data = {
+                    'index': idx,
+                    'attr': attr,
+                    'value': value,
+                    'label': label
+                }
+                f.write(json.dumps(index_data, ensure_ascii=False) + '\n')
+
+
 
 def prepare_enhanced_data_values(attr, dirty_csv, clean_csv, inconsistent_index_value_label_dict, related_attrs_dict, index_value_label_dict):
     """
@@ -1074,11 +1201,11 @@ def normalize_string(s):
                .replace("'", '"'))
 
 
-def process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, enhanced_gen_dict, funcs_for_attr, feature_all_dict, resp_path):
+def process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, expert_right_values, expert_wrong_values, related_attrs_dict, enhanced_gen_dict, funcs_for_attr, feature_all_dict, resp_path):
     fasttext_model = fasttext.load_model('./cc.en.300.bin')
     fasttext_dimension = len(dirty_csv.columns)
     fasttext.util.reduce_model(fasttext_model, fasttext_dimension)
-    feature_list, label_list = prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, enhanced_gen_dict, funcs_for_attr, fasttext_model, feature_all_dict, resp_path)
+    feature_list, label_list = prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, expert_right_values, expert_wrong_values, related_attrs_dict, enhanced_gen_dict, funcs_for_attr, fasttext_model, feature_all_dict, resp_path)
     return attr, feature_list, label_list
 
 
@@ -1148,7 +1275,7 @@ def single_val_feat(val, fasttext_m, funcs_for_attr, attr, idx, all_attrs, featu
         return idx, feature
 
 
-def prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, enhanced_gen_dict, funcs_for_attr, fasttext_m, feature_all_dict, resp_path):
+def prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, expert_right_values, expert_wrong_values, related_attrs_dict, enhanced_gen_dict, funcs_for_attr, fasttext_m, feature_all_dict, resp_path):
     feature_list = []
     label_list = []
     related_attrs = list(related_attrs_dict[attr])
@@ -1160,6 +1287,14 @@ def prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_att
         feature_list.append(feature)
         label_list.append(0)
     for idx, val in tqdm(wrong_values, ncols=120, desc=f"Processing {attr} wrong values"):
+        feature = single_val_feat(val, fasttext_m, funcs_for_attr, attr, -1, list(dirty_csv.columns), feature_all_dict, resp_path)
+        feature_list.append(feature)
+        label_list.append(1)
+    for idx, val in tqdm(expert_right_values, ncols=120, desc=f"Processing {attr} expert right values"):
+        feature = single_val_feat(val, fasttext_m, funcs_for_attr, attr, -1, list(dirty_csv.columns), feature_all_dict, resp_path)
+        feature_list.append(feature)
+        label_list.append(0)
+    for idx, val in tqdm(expert_wrong_values, ncols=120, desc=f"Processing {attr} expert wrong values"):
         feature = single_val_feat(val, fasttext_m, funcs_for_attr, attr, -1, list(dirty_csv.columns), feature_all_dict, resp_path)
         feature_list.append(feature)
         label_list.append(1)
@@ -2322,10 +2457,13 @@ if __name__ == "__main__":
                             if len(unlabeled_indices) > 0:  # 只有当有未标注的索引时才进行标注
                                 task_det_initial(attr_name, error_checking_res_directory, unlabeled_indices)
                 total_time += t.duration
-                
+                expert_wrong_values, expert_right_values = [], []
                 with Timer('Extract Labeling Results', logger, time_file) as t:
                     if (EXTRA_ALL_LABEL):
                         current_index_value_label_dict = extract_llm_label_res(all_attrs, error_checking_res_directory)
+                        # 删除current_index_value_label_dict中在expert_labeled_indices文件出现的索引
+                        remove_expert_labeled_indices(current_index_value_label_dict, resp_path)
+                        expert_wrong_values, expert_right_values = load_expert_labeled_data(resp_path)
                     else:
                         # 使用相同的indices字典提取标注结果
                         current_index_value_label_dict = extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict)
@@ -2339,7 +2477,7 @@ if __name__ == "__main__":
                     label_dict_train = {}
                     for attr in all_attrs:
                         # 在第一次迭代时，det_wrong_list和det_right_list为空，所以使用空列表
-                        attr, feature_list, label_list = process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, enhanced_gen_dict, funcs_for_attr, feature_all_dict, resp_path)
+                        attr, feature_list, label_list = process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, [], [], related_attrs_dict, enhanced_gen_dict, funcs_for_attr, feature_all_dict, resp_path)
                         feat_dict_train[attr] = feature_list
                         label_dict_train[attr] = label_list
                     
@@ -2361,8 +2499,8 @@ if __name__ == "__main__":
                     
                     # 比较LLM标注结果和分类器标注结果，找出标注不一致的索引
                     inconsistent_index_value_label_dict = compare_llm_and_classifier_labels(current_index_value_label_dict, det_wrong_list_res)
-                    
-
+                    # 将不一致的标注索引保存到expert_labeled_indices文件中
+                    save_inconsistent_indices(inconsistent_index_value_label_dict, resp_path)
                 # 将当前迭代的标注结果累积到总结果中
                 for attr, label_list in current_index_value_label_dict.items():
                     # 创建一个集合来跟踪已经添加的索引，避免重复
@@ -2416,6 +2554,7 @@ if __name__ == "__main__":
                             wrong_values, right_values, actual_right_values = prepare_enhanced_data_values(
                                 attr, dirty_csv, clean_csv, inconsistent_index_value_label_dict, related_attrs_dict, index_value_label_dict
                             )
+                            save_expert_labeled_data(wrong_values, right_values, actual_right_values, resp_path)
                             
                             # 调用生成增强数据的方法
                             generate_enhanced_data_from_values(
@@ -2424,7 +2563,7 @@ if __name__ == "__main__":
                             )
 
 
-                # 计算并记录inconsistent_index_value_label_dict中被标注为错误的数据数量
+                # 计算并记录inconsistent_index_value_label_dict中被标注的数据数量
                 if (i != 0):
                     expert_labeled_number = 0
                     for attr in all_attrs:
@@ -2475,7 +2614,7 @@ if __name__ == "__main__":
             feat_dict_train = {}
             label_dict_train = {}
             for attr in all_attrs:
-                attr, feature_list, label_list = process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, related_attrs_dict, enhanced_gen_dict, funcs_for_attr, feature_all_dict, resp_path)
+                attr, feature_list, label_list = process_attr_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, expert_right_values, expert_wrong_values, related_attrs_dict, enhanced_gen_dict, funcs_for_attr, feature_all_dict, resp_path)
                 feat_dict_train[attr] = feature_list
                 label_dict_train[attr] = label_list
             
