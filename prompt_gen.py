@@ -70,6 +70,8 @@ def error_check_prompt(col_values, col_name):
 \n\n'''
     prompt += "If unsure, do not indicate an error.\n"
     prompt += "- Please ignore the case sensitivity issues.\n\n"
+    prompt += "- Do not check for data type errors because they have all been converted to string type.\n\n"
+    prompt += "- You must NOT report any issues that involve string-vs-type interpretation or type mismatch.\n\n"
     prompt += "-----------------------------------------------\n\n"
     prompt += "Here are the given inputs:\n"
     prompt += f"Values of column '{col_name}' along with related attribute values:\n"
@@ -117,14 +119,15 @@ Given new clean values (clean_vals), generate `{num_errors}` new erroneous versi
 1. Follow the **same types of errors** learned from the sample pairs.
 2. Are **not identical** to any dirty sample.
 3. Are **not identical** to each other.
-4. Keep the original data type and general shape.
-5. Ensure that every error type inferred from the clean–dirty sample pairs is used at least once across the generated outputs.
+4. Must NOT be identical to the corresponding clean value; every error_value must be genuinely corrupted (i.e., a dirty value).
+5. Keep the original data type and general shape.
+6. Ensure that every error type inferred from the clean–dirty sample pairs is used at least once across the generated outputs.
 
 ----------------------------------------------------------
 ### Input Clean Values To Inject Errors Into:
 {clean_vals}
 
-### Clean-Dirt Pair Examples (for learning error types):
+### Clean-Dirty Pair Examples (for learning error types):
 Clean samples:
 {clean_vals_sample}
 
