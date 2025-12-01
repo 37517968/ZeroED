@@ -117,8 +117,9 @@ You must extract generalizable **error rules**, not specific strings.
 Given new clean values (clean_vals), generate `{num_errors}` new erroneous versions that:
 
 1. Follow the **same types of errors** learned from the sample pairs.
-2. Are **not identical** to any dirty sample.
-3. Are **not identical** to each other.
+2. Are **not identical** to each other.
+3. You MUST NOT output any version that contains "no error", "unchanged", "same as clean", 
+   "variety only", "no corruption", or anything similar.
 4. Must NOT be identical to the corresponding clean value; every error_value must be genuinely corrupted (i.e., a dirty value).
 5. Keep the original data type and general shape.
 6. Ensure that every error type inferred from the clean–dirty sample pairs is used at least once across the generated outputs.
