@@ -131,13 +131,9 @@ def extract_enhanced_info(text, attr):
         match = re.search(r'\[(.*?)\]', line)
         if match:
             try:
-                data = match.group().replace("Reason: '", "'Reason: ")
-                # 尝试使用 ast.literal_eval 解析
-                try:
-                    parsed_data = ast.literal_eval(data)
-                except (SyntaxError, ValueError) as e:
-                    # 如果 ast.literal_eval 失败，使用自定义解析逻辑
-                    parsed_data = parse_complex_list(data)
+                data = match.group()
+                # 使用自定义解析逻辑
+                parsed_data = parse_complex_list(data)
                 
                 err_info.append(attr_name)
                 for i, content in enumerate(parsed_data):
@@ -155,125 +151,94 @@ def extract_enhanced_info(text, attr):
 
 def parse_complex_list(data_str):
     """
-    解析包含特殊字符的复杂列表字符串
-    使用简单的方法：用单引号和逗号解析前两个元组，用大括号解析最后的词典结构
+    解析格式：
+    ['str1', 'str2', Pattern description: '.....', {dict}]
+    并支持：
+    - 字符串内部含引号或逗号
+    - Pattern description 内容可能跨行、包含逗号
+    - 最后一个 dict 中含引号、逗号
     """
+
     try:
-        # 移除外层方括号
-        content = data_str.strip('[]')
-        
-        # 初始化结果列表
+        # ================================
+        # 1. 去掉最外层 []
+        # ================================
+        content = data_str.strip()[1:-1]
+
         parsed_data = []
-        
-        # 查找字典部分的开始位置（第一个大括号）
-        dict_start = content.find('{')
-        
+
+        # ================================
+        # 2. 找 pattern 的起始
+        # ================================
+        pattern_start = content.find("Reason: ")
+        if pattern_start == -1:
+            pattern_start = content.find("Pattern description: ")
+        if pattern_start == -1:
+            raise ValueError("No Reason/Pattern description found")
+
+        before_pattern = content[:pattern_start]
+
+        # ================================
+        # 3. 提取前两个带单引号的字段（使用 ', 结束规则）
+        # ================================
+        first_two = []
+        i = 0
+        in_quote = False
+        token = ""
+
+        while i < len(before_pattern):
+            ch = before_pattern[i]
+
+            # --- 进入引号 ---
+            if ch == "'" and not in_quote:
+                in_quote = True
+                token += ch
+                i += 1
+                continue
+
+            # --- 引号内，检查是否遇到 ', 结束 ---
+            if in_quote:
+                if ch == "'" and i + 1 < len(before_pattern) and before_pattern[i+1] == ",":
+                    token += "'"
+                    cleaned = token.strip("'")
+                    first_two.append(cleaned)
+                    token = ""
+                    in_quote = False
+                    i += 2  # 跳过 ','
+                    continue
+                else:
+                    token += ch
+                    i += 1
+                    continue
+
+            i += 1
+
+        parsed_data.extend(first_two)
+
+        # ================================
+        # 4. 查找 dict 开始位置（是 pattern 的结束标志）
+        # ================================
+        dict_start = content.find("{", pattern_start)
         if dict_start == -1:
-            # 如果没有字典，使用简单的逗号分割
-            parts = content.split(',')
-            for part in parts:
-                parsed_data.append(part.strip().strip('\'"'))
-            return parsed_data
-        
-        # 分割非字典部分和字典部分
-        non_dict_part = content[:dict_start].strip()
-        dict_part = content[dict_start:].strip()
-        
-        # 处理非字典部分（前两个元组）
-        if non_dict_part:
-            # 使用正则表达式匹配单引号字符串
-            pattern = r'\'([^\']*)\''
-            matches = re.findall(pattern, non_dict_part)
-            
-            # 如果没有找到单引号字符串，尝试用逗号分割
-            if not matches:
-                parts = non_dict_part.split(',')
-                for part in parts:
-                    if part.strip():
-                        parsed_data.append(part.strip())
-            else:
-                # 添加匹配到的字符串
-                for match in matches:
-                    if match.strip():
-                        parsed_data.append(match.strip())
-        
-        # 处理字典部分
-        if dict_part.startswith('{') and dict_part.endswith('}'):
-            try:
-                # 尝试使用json.loads解析字典（如果格式正确）
-                try:
-                    # 将单引号替换为双引号，以便json.loads可以解析
-                    json_str = dict_part.replace("'", '"')
-                    parsed_dict = json.loads(json_str)
-                    parsed_data.append(parsed_dict)
-                except json.JSONDecodeError:
-                    # 如果json.loads失败，使用自定义解析逻辑
-                    dict_content = dict_part[1:-1]  # 移除外层大括号
-                    
-                    # 分割键值对
-                    result_dict = {}
-                    
-                    # 处理Reason和pattern description
-                    reason_match = re.search(r'Reason:\s*([^,]+)', dict_content)
-                    if reason_match:
-                        result_dict['Reason'] = reason_match.group(1).strip()
-                    
-                    pattern_match = re.search(r'pattern description:\s*([^,}]+)', dict_content)
-                    if pattern_match:
-                        result_dict['pattern description'] = pattern_match.group(1).strip()
-                    
-                    # 处理其他键值对
-                    # 使用正则表达式匹配键值对
-                    kv_pattern = r'([^:]+):\s*([^,}]+)'
-                    kv_matches = re.findall(kv_pattern, dict_content)
-                    
-                    for k, v in kv_matches:
-                        k = k.strip().strip('\'"')
-                        v = v.strip()
-                        
-                        # 跳过已经处理的Reason和pattern description
-                        if k in ['Reason', 'pattern description']:
-                            continue
-                            
-                        # 处理引号
-                        if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
-                            v = v[1:-1]
-                        
-                        result_dict[k] = v
-                    
-                    parsed_data.append(result_dict)
-            except Exception as e:
-                print(f"Error parsing dictionary: {e}")
-                # 如果解析失败，尝试使用简单的键值对分割
-                try:
-                    dict_content = dict_part[1:-1]  # 移除外层大括号
-                    # 分割字典键值对，处理包含单引号的值
-                    kv_pairs = re.findall(r'([^:]+):\s*(\'[^\']*\'|"[^"]*"|[^,]+)', dict_content)
-                    result_dict = {}
-                    for k, v in kv_pairs:
-                        k = k.strip().strip('\'"')
-                        v = v.strip()
-                        # 处理包含单引号的值，如 'O'Hare'
-                        if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
-                            # 移除外层引号，保留内部引号
-                            v = v[1:-1]
-                        result_dict[k] = v
-                    parsed_data.append(result_dict)
-                except Exception as e2:
-                    print(f"Error in fallback dictionary parsing: {e2}")
-                    parsed_data.append(dict_part)
-        
+            raise ValueError("No dict found")
+
+        # ================================
+        # 5. 第三个字段：pattern（直接从 pattern_start 到 dict_start）
+        # ================================
+        pattern_str = content[pattern_start:dict_start].rstrip(", ").strip()
+        parsed_data.append(pattern_str)
+
+        # ================================
+        # 6. 最后一个字段：字典（安全解析）
+        # ================================
+        dict_str = content[dict_start:].strip()
+        parsed_data.append(ast.literal_eval(dict_str))
+
         return parsed_data
+
     except Exception as e:
         print(f"Error in parse_complex_list: {e}")
-        # 如果所有方法都失败，返回原始字符串的简单分割
-        try:
-            # 最后的备选方案：简单分割并清理
-            content = data_str.strip('[]')
-            parts = content.split(',')
-            return [part.strip().strip('\'"') for part in parts]
-        except:
-            return []
+        return []
 
 
 def gen_dirty_funcs(attr, clean_info, errs_info):
