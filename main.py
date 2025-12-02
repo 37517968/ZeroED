@@ -290,7 +290,7 @@ def process_gen_err_data(ERR_GEN_USE, ERR_GEN_READ, read_err_gen_path, err_gen_d
             results = [executor.submit(task_gen_err_data, attr, dirty_csv, center_index_value_label_dict, related_attrs_dict, err_gen_dict) for attr in all_attrs]
             outputs = [result.result() for result in results]
 
-def save_expert_labeled_data(wrong_values, right_values, actual_right_values, resp_path):
+def save_expert_labeled_data(wrong_values, right_values, actual_right_values, expert_labeled_directory):
     """
     保存专家标注数据到文件
     
@@ -298,18 +298,18 @@ def save_expert_labeled_data(wrong_values, right_values, actual_right_values, re
         wrong_values: 错误值列表
         right_values: 正确值列表
         actual_right_values: 实际正确值列表
-        resp_path: 响应路径
+        expert_labeled_directory: 专家标注目录
     """
     # 保存wrong_values到expert_labled_wrong_values.txt
     if wrong_values:
-        wrong_values_file = open(os.path.join(resp_path, 'expert_labled_wrong_values.txt'), 'a', encoding='utf-8')
+        wrong_values_file = open(os.path.join(expert_labeled_directory, 'expert_labled_wrong_values.txt'), 'a', encoding='utf-8')
         for value in wrong_values:
             json.dump(value, wrong_values_file)
             wrong_values_file.write('\n')
         wrong_values_file.close()
     
     # 保存right_values和actual_right_values到expert_labled_right_values.txt
-    right_values_file = open(os.path.join(resp_path, 'expert_labled_right_values.txt'), 'a', encoding='utf-8')
+    right_values_file = open(os.path.join(expert_labeled_directory, 'expert_labled_right_values.txt'), 'a', encoding='utf-8')
     for value in right_values:
         json.dump(value, right_values_file)
         right_values_file.write('\n')
@@ -319,12 +319,12 @@ def save_expert_labeled_data(wrong_values, right_values, actual_right_values, re
     right_values_file.close()
 
 
-def load_expert_labeled_data(resp_path):
+def load_expert_labeled_data(expert_labeled_directory):
     """
     从文件加载专家标注数据
     
     Args:
-        resp_path: 响应路径
+        expert_labeled_directory: 专家标注目录
     
     Returns:
         expert_wrong_values: 专家标注的错误值列表
@@ -334,7 +334,7 @@ def load_expert_labeled_data(resp_path):
     expert_right_values = []
     
     # 从expert_labled_wrong_values.txt加载wrong_values
-    wrong_values_path = os.path.join(resp_path, 'expert_labled_wrong_values.txt')
+    wrong_values_path = os.path.join(expert_labeled_directory, 'expert_labled_wrong_values.txt')
     if os.path.exists(wrong_values_path):
         with open(wrong_values_path, 'r', encoding='utf-8') as file:
             for line in file:
@@ -356,18 +356,18 @@ def load_expert_labeled_data(resp_path):
                     continue
     
     return expert_wrong_values, expert_right_values
-def remove_expert_labeled_indices(current_index_value_label_dict, resp_path):
+def remove_expert_labeled_indices(current_index_value_label_dict, expert_labeled_directory):
     """
     删除current_index_value_label_dict中在expert_labeled_indices文件出现的索引
     
     Args:
         current_index_value_label_dict: 当前索引值标签字典
-        resp_path: 响应路径
+        expert_labeled_directory: 专家标注目录
     
     Returns:
         更新后的current_index_value_label_dict
     """
-    expert_labeled_indices_path = os.path.join(resp_path, 'expert_labeled_indices.txt')
+    expert_labeled_indices_path = os.path.join(expert_labeled_directory, 'expert_labeled_indices.txt')
     if os.path.exists(expert_labeled_indices_path):
         with open(expert_labeled_indices_path, 'r', encoding='utf-8') as f:
             expert_labeled_indices = set()
@@ -2313,6 +2313,7 @@ if __name__ == "__main__":
             funcs_pre_directory = f'{resp_path}/funcs_pre'
             err_gen_directory = f'{resp_path}/err_gen'
             enhanced_gen_directory = f'{resp_path}/enhanced'
+            expert_labeled_directory = f'{resp_path}/expert_labeled'
             os.makedirs(resp_path, exist_ok=True)
             os.makedirs(guide_directory, exist_ok=True)
             os.makedirs(error_checking_res_directory, exist_ok=True)
@@ -2320,6 +2321,7 @@ if __name__ == "__main__":
             os.makedirs(funcs_pre_directory, exist_ok=True)
             os.makedirs(err_gen_directory, exist_ok=True)
             os.makedirs(enhanced_gen_directory, exist_ok=True)
+            os.makedirs(expert_labeled_directory, exist_ok=True)
             
             dirty_path = base_dir + '/data/' + dataset + '_error-' + str(err_rate) + '.csv'
             clean_path = base_dir + '/data/' + dataset + '_clean.csv'
@@ -2426,8 +2428,8 @@ if __name__ == "__main__":
                     if (EXTRA_ALL_LABEL):
                         current_index_value_label_dict = extract_llm_label_res(all_attrs, error_checking_res_directory)
                         # 删除current_index_value_label_dict中在expert_labeled_indices文件出现的索引
-                        remove_expert_labeled_indices(current_index_value_label_dict, resp_path)
-                        expert_wrong_values, expert_right_values = load_expert_labeled_data(resp_path)
+                        remove_expert_labeled_indices(current_index_value_label_dict, expert_labeled_directory)
+                        expert_wrong_values, expert_right_values = load_expert_labeled_data(expert_labeled_directory)
                     else:
                         # 使用相同的indices字典提取标注结果
                         current_index_value_label_dict = extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict)
@@ -2521,7 +2523,7 @@ if __name__ == "__main__":
                             wrong_values, right_values, actual_right_values = prepare_enhanced_data_values(
                                 attr, dirty_csv, clean_csv, inconsistent_index_value_label_dict, related_attrs_dict, index_value_label_dict
                             )
-                            save_expert_labeled_data(wrong_values, right_values, actual_right_values, resp_path)
+                            save_expert_labeled_data(wrong_values, right_values, actual_right_values, expert_labeled_directory)
                             
                             # 调用生成增强数据的方法
                             generate_enhanced_data_from_values(
