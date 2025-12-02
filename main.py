@@ -525,7 +525,7 @@ def process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ, read_enhanced_path, e
                         except Exception as e:
                             logger.error(f"Unexpected error for attribute {attr}: {e}")
                             continue
-            enhanced_gen_dict[attr]['dirty'] = random.sample(enhanced_gen_dict[attr]['dirty'], len(enhanced_gen_dict[attr]['clean']))
+            # enhanced_gen_dict[attr]['dirty'] = random.sample(enhanced_gen_dict[attr]['dirty'], len(enhanced_gen_dict[attr]['clean']))
 
     elif ENHANCED_USE and not ENHANCED_READ:
         # 改为单线程处理，便于调试
@@ -610,10 +610,14 @@ def generate_enhanced_data_from_values(attr, related_attrs_dict, enhanced_gen_di
     clean_gen_file.write(clean_gen_ans)
     clean_gen_file.close()
     clean_info = extract_enhanced_info(clean_gen_ans, attr)
+    # 只保存这次运行新生成的数据，而不是整个enhanced_gen_dict
+    if new_clean_data:
+        clean_gen_res_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_res_{attr}.txt"), 'a', encoding='utf-8')
+        for clean_dict in new_clean_data:
+            json.dump(clean_dict, clean_gen_res_file)
+            clean_gen_res_file.write('\n')
+        clean_gen_res_file.close()
 
-    if (len(wrong_values_tmp) ==0):
-        logger.warning(f"No wrong values available for attribute {attr} to generate dirty data.")
-        return
     # 处理干净数据，获取filtered_clean
     filtered_clean = []
     filtered_clean.extend(right_values+actual_right_values)
@@ -631,6 +635,9 @@ def generate_enhanced_data_from_values(attr, related_attrs_dict, enhanced_gen_di
         except IndexError as e:
             logger.error(f"\nError: {e}\n Handling Value: {clean}\n Processing attribute: {attr}\n")
     
+    if (len(wrong_values_tmp) ==0):
+        logger.warning(f"No wrong values available for attribute {attr} to generate dirty data.")
+        return
     # 处理脏数据生成（修改为对filtered_clean中的数据注入错误）
     dirty_gen_ans = ""
     num_dirty_to_generate = len(filtered_clean)  # 使用filtered_clean的长度作为需要生成的脏数据数量
@@ -673,15 +680,7 @@ def generate_enhanced_data_from_values(attr, related_attrs_dict, enhanced_gen_di
                 new_dirty_data.append(dirty[3])
         except IndexError as e:
             logger.error(f"\nError: {e}\n Handling Value: {dirty}\n Processing attribute: {attr}\n")
-    
-    # 只保存这次运行新生成的数据，而不是整个enhanced_gen_dict
-    if new_clean_data:
-        clean_gen_res_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_res_{attr}.txt"), 'a', encoding='utf-8')
-        for clean_dict in new_clean_data:
-            json.dump(clean_dict, clean_gen_res_file)
-            clean_gen_res_file.write('\n')
-        clean_gen_res_file.close()
-    
+      
     if new_dirty_data:
         dirty_gen_res_file = open(os.path.join(enhanced_gen_directory, f"dirty_gen_res_{attr}.txt"), 'a', encoding='utf-8')
         for dirty_dict in new_dirty_data:
@@ -2513,6 +2512,9 @@ if __name__ == "__main__":
                         #         attr, dirty_csv, clean_csv, related_attrs_dict, enhanced_gen_dict, 
                         #         wrong_values, right_values, 15
                         #     )
+                        if (ENHANCED_USE and ENHANCED_READ):
+                            process_gen_enhanced_data(ENHANCED_USE, ENHANCED_READ, read_enhanced_path, enhanced_gen_directory, dirty_csv, clean_csv, 
+                        all_attrs, related_attrs_dict, index_value_label_dict, current_index_value_label_dict, enhanced_gen_dict, 15, logger)
                     else:
                         # 在主循环的else分支下获取wrong_values、right_values和actual_right_values
                         for attr in all_attrs:
