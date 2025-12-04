@@ -190,7 +190,7 @@ def parse_complex_list(data_str):
             ch = before_pattern[i]
 
             # --- 进入引号 ---
-            if ch == "'" and not in_quote:
+            if (ch == "'" or ch == '"') and not in_quote:
                 in_quote = True
                 token += ch
                 i += 1
@@ -198,9 +198,9 @@ def parse_complex_list(data_str):
 
             # --- 引号内，检查是否遇到 ', 结束 ---
             if in_quote:
-                if ch == "'" and i + 1 < len(before_pattern) and before_pattern[i+1] == ",":
+                if (ch == "'" or ch == '"') and i + 1 < len(before_pattern) and before_pattern[i+1] == ",":
                     token += "'"
-                    cleaned = token.strip("'")
+                    cleaned = token.strip("'\"") # 去掉外层引号
                     first_two.append(cleaned)
                     token = ""
                     in_quote = False
@@ -437,7 +437,10 @@ def prepare_enhanced_data_values(attr, dirty_csv, clean_csv, inconsistent_index_
     wrong_values = []
     right_values = []
     actual_right_values = []
-    
+
+    if attr not in inconsistent_index_value_label_dict:
+        return wrong_values, right_values, actual_right_values
+
     for idx, _, label in inconsistent_index_value_label_dict[attr]:
         if label == 1:
             # 与clean_csv对比，确定第一个值即dirty_csv.loc[int(idx), attr]是错误的还是正确的
@@ -610,13 +613,6 @@ def generate_enhanced_data_from_values(attr, related_attrs_dict, enhanced_gen_di
     clean_gen_file.write(clean_gen_ans)
     clean_gen_file.close()
     clean_info = extract_enhanced_info(clean_gen_ans, attr)
-    # 只保存这次运行新生成的数据，而不是整个enhanced_gen_dict
-    if new_clean_data:
-        clean_gen_res_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_res_{attr}.txt"), 'a', encoding='utf-8')
-        for clean_dict in new_clean_data:
-            json.dump(clean_dict, clean_gen_res_file)
-            clean_gen_res_file.write('\n')
-        clean_gen_res_file.close()
 
     # 处理干净数据，获取filtered_clean
     filtered_clean = []
@@ -634,6 +630,15 @@ def generate_enhanced_data_from_values(attr, related_attrs_dict, enhanced_gen_di
                 new_clean_data.append(clean[3])
         except IndexError as e:
             logger.error(f"\nError: {e}\n Handling Value: {clean}\n Processing attribute: {attr}\n")
+    # 只保存这次运行新生成的数据，而不是整个enhanced_gen_dict
+    if new_clean_data:
+        clean_gen_res_file = open(os.path.join(enhanced_gen_directory, f"clean_gen_res_{attr}.txt"), 'a', encoding='utf-8')
+        for clean_dict in new_clean_data:
+            json.dump(clean_dict, clean_gen_res_file)
+            clean_gen_res_file.write('\n')
+        clean_gen_res_file.close()
+
+    
     
     if (len(wrong_values_tmp) ==0):
         logger.warning(f"No wrong values available for attribute {attr} to generate dirty data.")
@@ -1957,6 +1962,65 @@ def compare_llm_and_classifier_labels(current_index_value_label_dict, det_wrong_
     
     return inconsistent_index_value_label_dict
 
+def select_expert_labeled_data(
+        inconsistent_index_value_label_dict,
+        expert_labeled_dict,
+        expert_labeled_number,
+        max_expert_labels,
+        max_per_attr_start=3
+    ):
+    expert_to_label_dict = {}
+    
+    # 已经标注的数量
+    remaining_budget = max_expert_labels - expert_labeled_number
+    if remaining_budget <= 0:
+        return {}, expert_labeled_number   # 已经满了，直接返回空字典
+
+    # —— Step 1：先对每个属性过滤掉已在 expert_labeled_dict 中的记录 ——
+    filtered_inconsistent = {}
+    for attr, items in inconsistent_index_value_label_dict.items():
+        already = set(expert_labeled_dict.get(attr, [])) # 只包含 idx
+        for idx, value, llm_label in items:
+            if idx not in already:
+                if attr not in filtered_inconsistent:
+                    filtered_inconsistent[attr] = []
+                filtered_inconsistent[attr].append((idx, value, llm_label))
+
+    # 如果没有任何可选的数据
+    if not filtered_inconsistent:
+        return {}, expert_labeled_number
+
+    # —— Step 2：尝试按 3、2、1 条依次选择，直到不超过预算 ——
+    for max_per_attr in range(max_per_attr_start, 0, -1):
+        expert_to_label_dict.clear()
+        count = 0
+
+        for attr, items in filtered_inconsistent.items():
+            take = min(max_per_attr, len(items))
+            selected = items[:take]
+
+            # 如果加上这批就超预算，则跳过不加
+            if max_per_attr > 1 and count + len(selected) > remaining_budget:
+                break
+
+            expert_to_label_dict[attr] = selected
+            count += len(selected)
+
+            if count >= remaining_budget:
+                break  # 预算用完
+
+        # 如果这轮选择没有超过预算，则可以返回
+        if count <= remaining_budget and count > 0:
+            break
+    # —— Step 3：更新 expert_labeled_dict ——  
+    for attr, items in expert_to_label_dict.items():
+        if attr not in expert_labeled_dict:
+            expert_labeled_dict[attr] = []
+        expert_labeled_dict[attr].extend(item[0] for item in items)
+    expert_labeled_number = expert_labeled_number + sum(len(v) for v in expert_to_label_dict.values())
+    # 最后兜底：如果 1 条都选不下，返回空
+    return expert_to_label_dict, expert_labeled_number
+
 def print_prediction_errors(dirty_csv, clean_csv, det_wrong_list_res, all_attrs, related_attrs_dict, logger):
     """
     打印预测错误的数据，包括没有找到的错误和将正确值误判为错误的值，
@@ -2253,7 +2317,7 @@ if __name__ == "__main__":
     REL_TOP = config['model']['rel_top']
     LABEL_PROP = config['model']['label_prop']
     ITERATIONS = config['model']['iterations']
-    
+    max_expert_labels = 20
     
     # Read settings
     PRE_FUNC_READ = config['read']['pre_func']
@@ -2385,6 +2449,7 @@ if __name__ == "__main__":
             num_epochs = 5000
             # 初始化之前选择过的聚类字典
             previously_selected_clusters = {}
+            expert_labeled_dict = defaultdict(list)
 
             for i in range(iterations):
                 indices_dict = {}                
@@ -2465,8 +2530,9 @@ if __name__ == "__main__":
                     
                     # 比较LLM标注结果和分类器标注结果，找出标注不一致的索引
                     inconsistent_index_value_label_dict = compare_llm_and_classifier_labels(current_index_value_label_dict, det_wrong_list_res)
+                    expert_to_label_dict, expert_labeled_number = select_expert_labeled_data(inconsistent_index_value_label_dict, expert_labeled_dict, expert_labeled_number, max_expert_labels)
                     # 将不一致的标注索引保存到expert_labeled_indices文件中
-                    save_inconsistent_indices(inconsistent_index_value_label_dict, resp_path)
+                    save_inconsistent_indices(expert_to_label_dict, expert_labeled_directory)
                 # 将当前迭代的标注结果累积到总结果中
                 for attr, label_list in current_index_value_label_dict.items():
                     # 创建一个集合来跟踪已经添加的索引，避免重复
@@ -2521,7 +2587,7 @@ if __name__ == "__main__":
                         # 在主循环的else分支下获取wrong_values、right_values和actual_right_values
                         for attr in all_attrs:
                             wrong_values, right_values, actual_right_values = prepare_enhanced_data_values(
-                                attr, dirty_csv, clean_csv, inconsistent_index_value_label_dict, related_attrs_dict, index_value_label_dict
+                                attr, dirty_csv, clean_csv, expert_to_label_dict, related_attrs_dict, index_value_label_dict
                             )
                             save_expert_labeled_data(wrong_values, right_values, actual_right_values, expert_labeled_directory)
                             
@@ -2532,16 +2598,13 @@ if __name__ == "__main__":
                             )
 
 
-                # 计算并记录inconsistent_index_value_label_dict中被标注的数据数量
-                if (i != 0):
-                    expert_labeled_number = 0
-                    for attr in all_attrs:
-                        if attr in inconsistent_index_value_label_dict:
-                            expert_labeled_number += len(inconsistent_index_value_label_dict[attr])
-                    # 记录到参数文件
-                    para_file.write(f"第 {i+1} 次迭代中专家标注的数量: {expert_labeled_number}\n")
+                
 
                 total_time += t.duration
+                if (expert_labeled_number) >= 20:
+                    logger.info("达到专家标注上限，终止迭代。")
+                    break
+                
                 if (i != iterations-1):
                     with Timer('Select Optimal Cluster', logger, time_file) as t:
                         optimal_cluster_result = process_select_optimal_cluster(
