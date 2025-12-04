@@ -8,6 +8,7 @@ import pickle
 import random
 import re
 import time
+import shutil
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -345,7 +346,7 @@ def load_expert_labeled_data(expert_labeled_directory):
                     continue
     
     # 从expert_labled_right_values.txt加载right_values
-    right_values_path = os.path.join(resp_path, 'expert_labled_right_values.txt')
+    right_values_path = os.path.join(expert_labeled_directory, 'expert_labled_right_values.txt')
     if os.path.exists(right_values_path):
         with open(right_values_path, 'r', encoding='utf-8') as file:
             for line in file:
@@ -356,17 +357,23 @@ def load_expert_labeled_data(expert_labeled_directory):
                     continue
     
     return expert_wrong_values, expert_right_values
-def remove_expert_labeled_indices(current_index_value_label_dict, expert_labeled_directory):
+def remove_expert_labeled_indices(current_index_value_label_dict, expert_labeled_directory, read_expert_path):
     """
     删除current_index_value_label_dict中在expert_labeled_indices文件出现的索引
     
     Args:
         current_index_value_label_dict: 当前索引值标签字典
         expert_labeled_directory: 专家标注目录
+        read_expert_path: 读取专家标注路径
     
     Returns:
         更新后的current_index_value_label_dict
     """
+    
+    for filename in os.listdir(read_expert_path):
+        src_file = os.path.join(read_expert_path, filename)
+        dst_file = os.path.join(expert_labeled_directory, filename)
+        shutil.copy2(src_file, dst_file) 
     expert_labeled_indices_path = os.path.join(expert_labeled_directory, 'expert_labeled_indices.txt')
     if os.path.exists(expert_labeled_indices_path):
         with open(expert_labeled_indices_path, 'r', encoding='utf-8') as f:
@@ -1259,11 +1266,11 @@ def prep_train_feat(attr, dirty_csv, det_right_list, det_wrong_list, expert_righ
         feature = single_val_feat(val, fasttext_m, funcs_for_attr, attr, -1, list(dirty_csv.columns), feature_all_dict, resp_path)
         feature_list.append(feature)
         label_list.append(1)
-    for idx, val in tqdm(expert_right_values, ncols=120, desc=f"Processing {attr} expert right values"):
+    for val in tqdm(expert_right_values, ncols=120, desc=f"Processing {attr} expert right values"):
         feature = single_val_feat(val, fasttext_m, funcs_for_attr, attr, -1, list(dirty_csv.columns), feature_all_dict, resp_path)
         feature_list.append(feature)
         label_list.append(0)
-    for idx, val in tqdm(expert_wrong_values, ncols=120, desc=f"Processing {attr} expert wrong values"):
+    for val in tqdm(expert_wrong_values, ncols=120, desc=f"Processing {attr} expert wrong values"):
         feature = single_val_feat(val, fasttext_m, funcs_for_attr, attr, -1, list(dirty_csv.columns), feature_all_dict, resp_path)
         feature_list.append(feature)
         label_list.append(1)
@@ -1856,7 +1863,8 @@ def extract_all_llm_label_res(all_attrs, error_checking_res_directory):
         content = content.replace('\\+', '').replace('\\n', '\n')
         
         # 使用正则表达式匹配每个块
-        block_pattern = r'// indices:\s*\[(.*?)\][\s\S]*?```json\s*(\{[\s\S]*?\})\s*```'
+        block_pattern = r'// indices:\s*\[(.*?)\][\s\S]*?(?:```json\s*)?(\{[\s\S]*?})(?=\s*(?:// indices:|\Z))'
+
         blocks = re.findall(block_pattern, content, re.DOTALL)
         
         for indices_str, json_content in blocks:
@@ -1866,25 +1874,20 @@ def extract_all_llm_label_res(all_attrs, error_checking_res_directory):
                 # 直接手动分割字符串，提取数字
                 indices = [int(x) for x in re.findall(r'\d+', indices_str_clean)]
                 
-                # 解析JSON内容
-                json_data = json.loads(json_content)
-                entries = json_data.get('entries', [])
-                
-                # 确保indices和entries的数量匹配
-                if len(indices) != len(entries):
+                # 在json_content中找到字符串"has_error_in_Address_value": false或者true
+                label = re.findall(fr'"has_error_in_{attr}_value":\s*(true|false)', json_content)
+                label = [1 if l == 'true' else 0 for l in label]
+                # 确保indices和label的数量匹配
+                if len(indices) != len(label):
                     print(f"Warning: indices and entries count mismatch for {attr}")
                     continue
                 
                 # 处理每个条目
-                for idx, entry in zip(indices, entries):
+                for idx, label in zip(indices, label):
                     try:
                         # 获取该索引处的值
                         related_attrs = list(related_attrs_dict[attr])
                         value = dirty_csv.loc[idx, [attr] + related_attrs].to_dict()
-                        
-                        # 从JSON条目中获取标签
-                        label_key = f"has_error_in_{attr}_value"
-                        label = 1 if entry.get(label_key, False) else 0
                         
                         # 添加到结果字典
                         index_value_label_dict[attr].append((idx, value, label))
@@ -2317,7 +2320,8 @@ if __name__ == "__main__":
     REL_TOP = config['model']['rel_top']
     LABEL_PROP = config['model']['label_prop']
     ITERATIONS = config['model']['iterations']
-    max_expert_labels = 20
+    max_expert_labels = 10
+    max_per_attr_start = 2
     
     # Read settings
     PRE_FUNC_READ = config['read']['pre_func']
@@ -2367,6 +2371,7 @@ if __name__ == "__main__":
             read_pre_func_path = os.path.join(read_path, 'funcs_pre')
             read_err_gen_path = os.path.join(read_path, 'err_gen')
             read_error_path = read_path + 'funcs'
+            read_expert_path = os.path.join(read_path, 'expert_labeled')
             
             date_time = datetime.now().strftime("%m-%d")
             now_time = datetime.now().strftime("%H:%M")
@@ -2493,7 +2498,7 @@ if __name__ == "__main__":
                     if (EXTRA_ALL_LABEL):
                         current_index_value_label_dict = extract_llm_label_res(all_attrs, error_checking_res_directory)
                         # 删除current_index_value_label_dict中在expert_labeled_indices文件出现的索引
-                        remove_expert_labeled_indices(current_index_value_label_dict, expert_labeled_directory)
+                        remove_expert_labeled_indices(current_index_value_label_dict, expert_labeled_directory, read_expert_path)
                         expert_wrong_values, expert_right_values = load_expert_labeled_data(expert_labeled_directory)
                     else:
                         # 使用相同的indices字典提取标注结果
@@ -2530,7 +2535,7 @@ if __name__ == "__main__":
                     
                     # 比较LLM标注结果和分类器标注结果，找出标注不一致的索引
                     inconsistent_index_value_label_dict = compare_llm_and_classifier_labels(current_index_value_label_dict, det_wrong_list_res)
-                    expert_to_label_dict, expert_labeled_number = select_expert_labeled_data(inconsistent_index_value_label_dict, expert_labeled_dict, expert_labeled_number, max_expert_labels)
+                    expert_to_label_dict, expert_labeled_number = select_expert_labeled_data(inconsistent_index_value_label_dict, expert_labeled_dict, expert_labeled_number, max_expert_labels, max_per_attr_start)
                     # 将不一致的标注索引保存到expert_labeled_indices文件中
                     save_inconsistent_indices(expert_to_label_dict, expert_labeled_directory)
                 # 将当前迭代的标注结果累积到总结果中
@@ -2601,7 +2606,7 @@ if __name__ == "__main__":
                 
 
                 total_time += t.duration
-                if (expert_labeled_number) >= 20:
+                if (expert_labeled_number) >= max_expert_labels:
                     logger.info("达到专家标注上限，终止迭代。")
                     break
                 
