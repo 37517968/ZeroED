@@ -98,121 +98,32 @@ def create_dirty_gen_inst_prompt(clean_vals, clean_vals_sample, dirty_vals_sampl
     
     prompt = f"""
 You are a data quality analyst. Your task is to inject realistic errors into clean data for the attribute `{target_attribute}`.
-
+----------------------------------------------------------
+### 1. Learn Error Patterns
 You are provided with **paired examples** of:
-1. clean_vals_sample  →  correct values  
-2. dirty_vals_sample  →  erroneous versions of the corresponding clean values 
+- Clean samples:{clean_vals_sample}
+- Dirty samples:{dirty_vals_sample}
 
-These *paired examples* demonstrate **how errors happen** for this attribute.
-Your job is NOT to repeat these errors, but to **learn the error patterns** and apply similar patterns to new clean values.
-
-### Error Pattern Learning
-Compare each `(clean_vals_sample[i], dirty_vals_sample[i])` pair and infer:
-- what kind of error occurred  
-(e.g., deletion, insertion, substitution, truncation, OCR error, swapped chars, added noise suffix, case distortion, digit-letter confusion, etc.)
-You must extract generalizable **error rules**, not specific strings.
-
+From each pair, infer the transformation rules (error type and how it changes the clean value).
 ----------------------------------------------------------
-### Your Output Goal
-Given new clean values (clean_vals), generate `{num_errors}` new erroneous versions that:
-
-1. Follow the **same types of errors** learned from the sample pairs.
-2. Are **not identical** to each other.
-3. You MUST NOT output any version that contains "no error", "unchanged", "same as clean", 
-   "variety only", "no corruption", or anything similar.
-4. Must NOT be identical to the corresponding clean value; every error_value must be genuinely corrupted (i.e., a dirty value).
-5. Keep the original data type and general shape.
-6. Ensure that every error type inferred from the clean–dirty sample pairs is used at least once across the generated outputs.
-
-----------------------------------------------------------
-### Input Clean Values To Inject Errors Into:
+### 2. Generate New Errors
+For the following clean values:
 {clean_vals}
 
-### Clean-Dirty Pair Examples (for learning error types):
-Clean samples:
-{clean_vals_sample}
-
-Dirty samples:
-{dirty_vals_sample}
-
+Generate **{num_errors} erroneous versions per clean value**, ensuring:
+- For each clean value, generate a corresponding erroneous value (one-to-one mapping), rather than reusing or copying any provided dirty sample.
+- Errors follow the learned transformation patterns.
+- Each error value is unique and differs from the clean value.
+- The general data type and structure remain valid.
 ----------------------------------------------------------
-
+### 3. Output Format (strict)
 The output should be in the following strict format:
 ['{target_attribute}', error_value_1, Reason: 'Error type1: Specific reason', {str(template_dict_1)}]
 ['{target_attribute}', error_value_2, Reason: 'Error type2: Specific reason', {str(template_dict_2)}]
 ...
-Please ensure that:
-1. The reasons for each error are clearly specified, explaining the error type.
-2. Each clean value gets multiple versions with different error types.
-3. The generated errors are realistic and diverse.
-4. Do not duplicate the reference wrong values exactly.
---------------------------------------------------------------------------
-"""
-    return prompt
-
-def create_dirty_gen_inst_prompt_0_round(clean_vals, clean_vals_sample, dirty_vals_sample, target_attribute, num_errors=20):
-    if len(clean_vals) > 0:
-        temp_vals = clean_vals[0]
-    elif len(clean_vals_sample) > 0:
-        temp_vals = clean_vals_sample[0]
-    elif len(dirty_vals_sample) > 0:
-        temp_vals = dirty_vals_sample[0]
-    else:
-        print(f"No vals in clean_vals and dirty_vals_sample of attr {target_attribute}")
-        temp_vals = f"{target_attribute}: none"
-    attrs = re.findall(r"'(\w+)':", str(temp_vals))
-    template_dict_1 = {key: f'{key}_val_1' for key in attrs}
-    template_dict_1[target_attribute] = 'clean_value_1'
-    template_dict_2 = {key: f'{key}_val_2' for key in attrs}
-    template_dict_2[target_attribute] = 'clean_value_2'
-    
-    prompt = f"""
-You are a data quality analyst. Your task is to inject realistic errors into clean data for the attribute `{target_attribute}`.
-
-You are provided with **examples** of:
-1. clean_vals_sample  →  correct values  
-2. dirty_vals_sample  →  erroneous values 
-
-These *examples* demonstrate **how errors happen** for this attribute.
-Your job is NOT to repeat these errors, but to **learn the error patterns** and apply similar patterns to new clean values.
-
-### Error Pattern Learning
-Compare each `(clean_vals_sample[i], dirty_vals_sample[i])` pair and infer:
-- what kind of error occurred  
-(e.g., deletion, insertion, substitution, truncation, OCR error, swapped chars, added noise suffix, case distortion, digit-letter confusion, etc.)
-You must extract generalizable **error rules**, not specific strings.
-
-----------------------------------------------------------
-### Your Output Goal
-Given new clean values (clean_vals), generate `{num_errors}` new erroneous versions that:
-
-1. Follow the **same types of errors** learned from the sample pairs.
-2. Are **not identical** to any dirty sample.
-3. Are **not identical** to each other.
-4. Keep the original data type and general shape.
-
-----------------------------------------------------------
-### Input Clean Values To Inject Errors Into:
-{clean_vals}
-
-### Clean-Dirt Pair Examples (for learning error types):
-Clean samples:
-{clean_vals_sample}
-
-Dirty samples:
-{dirty_vals_sample}
-
-----------------------------------------------------------
-
-The output should be in the following strict format:
-['{target_attribute}', error_value_1, Reason: 'Error type1: Specific reason', {str(template_dict_1)}]
-['{target_attribute}', error_value_2, Reason: 'Error type2: Specific reason', {str(template_dict_2)}]
-...
-Please ensure that:
-1. The reasons for each error are clearly specified, explaining the error type.
-2. Each clean value gets multiple versions with different error types.
-3. The generated errors are realistic and diverse.
-4. Do not duplicate the reference wrong values exactly.
+Where:
+- `error_value` is the newly generated erroneous value.
+- `Reason` describes the applied transformation.
 --------------------------------------------------------------------------
 """
     return prompt

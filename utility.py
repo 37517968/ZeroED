@@ -120,10 +120,10 @@ def get_ans_from_llm(prompt, api_use=False):
                 print(e)
     elif api_use:
         # model_type='llama-3-8b'
-        model_type='qwen2.5-72b-instruct'# gpt-4o-mini
+        model_type='qwen3-max'# qwen2.5-72b-instruct gpt-4o-mini
         role_descr="You are a world-class data engineer, proficient in cleaning dirty data."
         api_key_list = [
-            'sk-9SSJQSfSLf7aUtfTCMhCgsxiw5deylXvOUuHtPCDDB3Sa1ds'
+            'sk-cf0f901fbe8847099502a50aa2d59ec9' # sk-9SSJQSfSLf7aUtfTCMhCgsxiw5deylXvOUuHtPCDDB3Sa1ds
         ]
         # Exponential backoff parameters
         base_sleep = 0.2
@@ -135,7 +135,7 @@ def get_ans_from_llm(prompt, api_use=False):
             try:
                 client = OpenAI(
                     api_key=api_key_list[key_idx],
-                    base_url='https://jeniya.cn/v1'
+                    base_url='https://dashscope.aliyuncs.com/compatible-mode/v1' # https://jeniya.cn/v1
                 )
                 completion_res = client.chat.completions.create(
                     model=model_type,
