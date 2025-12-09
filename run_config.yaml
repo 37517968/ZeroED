@@ -1,5 +1,5 @@
 model:
-  iterations: 2
+  iterations: 5
   api_use: true
   pre_func_use: true
   related_attrs: true
@@ -33,7 +33,7 @@ data:
   base_dir: '.'
   err_rate_list: ["01"] #["mixed_err", "typos", "missing_values", "pattern_violations", "rule_violations", "outliers"]
   all_set_num: 1
-  datasets: ['beers']
+  datasets: [ 'hospital'] # 'rayyan', 'flights','billionaire', 'beers'
   err_check_val_num_per_query: 20
   result_dir: 'pipeline'
   
@@ -45,4 +45,4 @@ read_paths:
   # flights01-3: './result/pipeline/02-08 flights01-5%-set3/'
   # flights01-4: './result/pipeline/02-08 flights01-5%-set4/'
   # flights01-5: './result/pipeline/02-08 flights01-5%-set5/'
-  hospital01-1: './result/pipeline/10-28 hospital01-5%-set1/'
+  hospital01-1: './result/pipeline/12-05 14:15 hospital01-5%-set1-iterations5'

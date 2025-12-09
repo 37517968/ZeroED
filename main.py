@@ -370,10 +370,7 @@ def remove_expert_labeled_indices(current_index_value_label_dict, expert_labeled
         更新后的current_index_value_label_dict
     """
     
-    for filename in os.listdir(read_expert_path):
-        src_file = os.path.join(read_expert_path, filename)
-        dst_file = os.path.join(expert_labeled_directory, filename)
-        shutil.copy2(src_file, dst_file) 
+    copy_read_files_in_dir(expert_labeled_directory, read_expert_path)
     expert_labeled_indices_path = os.path.join(expert_labeled_directory, 'expert_labeled_indices.txt')
     if os.path.exists(expert_labeled_indices_path):
         with open(expert_labeled_indices_path, 'r', encoding='utf-8') as f:
@@ -1785,6 +1782,17 @@ def right_pat_in_text_attr(attr):
     pattern = fr'"value_row":\s*(".*?"),\s*\n\s*"error_analysis":\s*"[^"]*",\s*\n\s*"has_error_in_{attr}_value":\s*false'
     return pattern
 
+def save_label_dict(index_value_label_dict, save_path):
+    """
+    将 index_value_label_dict 累积写入文件（append 模式）
+    文件格式：每行一个 JSON 对象，格式：
+    {"attr": attr, "idx": idx, "value": value, "label": label}
+    """
+    with open(save_path, 'a', encoding='utf-8') as f:
+        for attr, items in index_value_label_dict.items():
+            for idx, value, label in items:
+                rec = {"attr": attr, "idx": int(idx), "value": value, "label": label}
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 def extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict=None):
     """
@@ -1800,7 +1808,7 @@ def extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict=
     """
     # 如果indices_dict为None，则提取所有标签
     if indices_dict is None:
-        return extract_all_llm_label_res(all_attrs, error_checking_res_directory)
+        return extract_all_llm_label_res(error_checking_res_directory)
     all_extracted_values = defaultdict(list)
     index_value_label_dict = defaultdict(list)
     
@@ -1839,65 +1847,27 @@ def extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict=
                 else:
                     temp_list.append((idx, value, 0))
             index_value_label_dict[attr] = temp_list
-    
+    save_label_dict(index_value_label_dict, os.path.join(error_checking_res_directory, f'llm_label_result.txt'))
     return index_value_label_dict
 
 
-def extract_all_llm_label_res(all_attrs, error_checking_res_directory):
+def extract_all_llm_label_res(error_checking_res_directory):
     """
-    从LLM标注结果中提取所有标签，不限制indices
-    
-    Args:
-        all_attrs: 所有属性列表
-        error_checking_res_directory: 错误检查结果目录
-    
-    Returns:
-        索引值标签字典，格式为 {attr: [(idx, value, label), ...]}
+    从保存的文件中读取数据，并恢复为：
+    {attr: [(idx, value, label), ...]}
     """
     index_value_label_dict = defaultdict(list)
-    
-    for attr in all_attrs:
-        content = ""
-        with open(os.path.join(error_checking_res_directory, f'error_checking_{attr}.txt'), 'r', encoding='utf-8') as f:
-            content = f.read()
-        content = content.replace('\\+', '').replace('\\n', '\n')
-        
-        # 使用正则表达式匹配每个块
-        block_pattern = r'// indices:\s*\[(.*?)\][\s\S]*?(?:```json\s*)?(\{[\s\S]*?})(?=\s*(?:// indices:|\Z))'
 
-        blocks = re.findall(block_pattern, content, re.DOTALL)
-        
-        for indices_str, json_content in blocks:
-            try:
-                # 解析indices列表，先去除换行符
-                indices_str_clean = indices_str.replace('\n', ' ').strip()
-                # 直接手动分割字符串，提取数字
-                indices = [int(x) for x in re.findall(r'\d+', indices_str_clean)]
-                
-                # 在json_content中找到字符串"has_error_in_Address_value": false或者true
-                label = re.findall(fr'"has_error_in_{attr}_value":\s*(true|false)', json_content)
-                label = [1 if l == 'true' else 0 for l in label]
-                # 确保indices和label的数量匹配
-                if len(indices) != len(label):
-                    print(f"Warning: indices and entries count mismatch for {attr}")
-                    continue
-                
-                # 处理每个条目
-                for idx, label in zip(indices, label):
-                    try:
-                        # 获取该索引处的值
-                        related_attrs = list(related_attrs_dict[attr])
-                        value = dirty_csv.loc[idx, [attr] + related_attrs].to_dict()
-                        
-                        # 添加到结果字典
-                        index_value_label_dict[attr].append((idx, value, label))
-                    except Exception as e:
-                        print(f"Error processing entry for {attr}, index {idx}: {e}")
-                        continue
-            except Exception as e:
-                print(f"Error processing block for {attr}: {e}")
+    with open(os.path.join(error_checking_res_directory, f'llm_label_result.txt'), 'r', encoding='utf-8') as f:
+        for line in f:
+            if not line.strip():
                 continue
-    
+            rec = json.loads(line)
+            attr = rec["attr"]
+            index_value_label_dict[attr].append(
+                (rec["idx"], rec["value"], rec["label"])
+            )
+
     return index_value_label_dict
 
 
@@ -2321,7 +2291,7 @@ if __name__ == "__main__":
     LABEL_PROP = config['model']['label_prop']
     ITERATIONS = config['model']['iterations']
     max_expert_labels = 10
-    max_per_attr_start = 2
+    max_per_attr_start = 1
     
     # Read settings
     PRE_FUNC_READ = config['read']['pre_func']
@@ -2623,7 +2593,7 @@ if __name__ == "__main__":
                                 previously_selected_clusters[attr] = []
                             previously_selected_clusters[attr].append(cluster_info['cluster_idx'])
                     total_time += t.duration
-
+            para_file.write(f"Iteration {i+1}\n")
 
             para_file.write(f"LLM labeled value number: {labeled_number}\n")
 
