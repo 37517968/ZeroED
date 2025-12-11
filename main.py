@@ -128,6 +128,8 @@ def extract_enhanced_info(text, attr):
     attr_name = attr
     lines = text.split('\n')
     for line in lines:
+        if "_val_" in line or "_value_" in line:
+            continue
         err_info = []
         match = re.search(r'\[(.*?)\]', line)
         if match:
@@ -252,7 +254,7 @@ def gen_dirty_funcs(attr, clean_info, errs_info):
         dirty_str = dirty_str + str(errs_info)
         dirty_str = dirty_str + "\n"
     func_gen_prompt = err_clean_func_prompt(attr, clean_info, dirty_str)
-    llm_gen_func = get_ans_from_llm(func_gen_prompt, api_use=API_USE)
+    llm_gen_func = get_ans_from_llm(func_gen_prompt, api_use=API_USE, model_type=MODEL_TYPE)
     temp_clean_flist, dirty_flist = extract_func(llm_gen_func)
     return temp_clean_flist, dirty_flist, func_gen_prompt, llm_gen_func
 
@@ -605,13 +607,13 @@ def generate_enhanced_data_from_values(attr, related_attrs_dict, enhanced_gen_di
         for batch in range(num_batches):
             batch_size = min(15, num_gen - batch * 15)
             clean_gen_prompt = create_clean_gen_inst_prompt(actual_right_values_tmp, attr, num_gen=batch_size)
-            batch_clean_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE)
+            batch_clean_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE, model_type=MODEL_TYPE)
             clean_gen_ans += batch_clean_ans + "\n\n"
             clean_gen_prompt_file.write('*'*20 + f' batch {batch+1} prompt ' + '*'*20 + '\n' + clean_gen_prompt + '\n' + '*'*20 + f' batch {batch+1} answer ' + '*'*20 + '\n' + batch_clean_ans + '\n\n\n\n\n\n')
     else:
         # 一次性生成
         clean_gen_prompt = create_clean_gen_inst_prompt(actual_right_values_tmp, attr, num_gen=num_gen)
-        clean_gen_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE)
+        clean_gen_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE, model_type=MODEL_TYPE)
         clean_gen_prompt_file.write('*'*20 + ' prompt ' + '*'*20 + '\n' + clean_gen_prompt + '\n' + '*'*20 + ' answer ' + '*'*20 + '\n' + clean_gen_ans + '\n\n\n\n\n\n')
     clean_gen_prompt_file.close()
     clean_gen_file.write(clean_gen_ans)
@@ -661,13 +663,13 @@ def generate_enhanced_data_from_values(attr, related_attrs_dict, enhanced_gen_di
             clean_for_error_injection = filtered_clean[start_idx:end_idx]
             
             dirty_gen_prompt = create_dirty_gen_inst_prompt(clean_for_error_injection, right_values_tmp, wrong_values_tmp, attr, num_errors=len(clean_for_error_injection))
-            batch_dirty_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE)
+            batch_dirty_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE, model_type=MODEL_TYPE)
             dirty_gen_ans += batch_dirty_ans + "\n\n"
             dirty_gen_prompt_file.write('*'*20 + f' batch {batch+1} prompt ' + '*'*20 + '\n' + dirty_gen_prompt + '\n' + '*'*20 + f' batch {batch+1} answer ' + '*'*20 + '\n' + batch_dirty_ans + '\n\n\n\n\n\n')
     else:
         # 一次性生成
         dirty_gen_prompt = create_dirty_gen_inst_prompt(filtered_clean, right_values_tmp, wrong_values_tmp, attr, num_errors=num_dirty_to_generate)
-        dirty_gen_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE)
+        dirty_gen_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE, model_type=MODEL_TYPE)
         dirty_gen_prompt_file.write('*'*20 + ' prompt ' + '*'*20 + '\n' + dirty_gen_prompt + '\n' + '*'*20 + ' answer ' + '*'*20 + '\n' + dirty_gen_ans + '\n\n\n\n\n\n')
     
     dirty_gen_prompt_file.close()
@@ -752,13 +754,13 @@ def generate_enhanced_data_from_wrong_right_values(attr, dirty_csv, clean_csv, r
         for batch in range(num_batches):
             batch_size = min(15, num_gen - batch * 15)
             clean_gen_prompt = create_clean_gen_inst_prompt(right_values_tmp, attr, num_gen=batch_size)
-            batch_clean_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE)
+            batch_clean_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE, model_type=MODEL_TYPE)
             clean_gen_ans += batch_clean_ans + "\n\n"
             clean_gen_prompt_file.write('*'*20 + f' batch {batch+1} prompt ' + '*'*20 + '\n' + clean_gen_prompt + '\n' + '*'*20 + f' batch {batch+1} answer ' + '*'*20 + '\n' + batch_clean_ans + '\n\n\n\n\n\n')
     else:
         # 一次性生成
         clean_gen_prompt = create_clean_gen_inst_prompt(right_values_tmp, attr, num_gen=num_gen)
-        clean_gen_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE)
+        clean_gen_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE, model_type=MODEL_TYPE)
         clean_gen_prompt_file.write('*'*20 + ' prompt ' + '*'*20 + '\n' + clean_gen_prompt + '\n' + '*'*20 + ' answer ' + '*'*20 + '\n' + clean_gen_ans + '\n\n\n\n\n\n')
     clean_gen_prompt_file.close()
     clean_gen_file.write(clean_gen_ans)
@@ -798,13 +800,13 @@ def generate_enhanced_data_from_wrong_right_values(attr, dirty_csv, clean_csv, r
             clean_for_error_injection = filtered_clean[start_idx:end_idx]
             
             dirty_gen_prompt = create_dirty_gen_inst_prompt(clean_for_error_injection, right_values_tmp, wrong_values_tmp, attr, num_errors=len(clean_for_error_injection))
-            batch_dirty_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE)
+            batch_dirty_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE, model_type=MODEL_TYPE)
             dirty_gen_ans += batch_dirty_ans + "\n\n"
             dirty_gen_prompt_file.write('*'*20 + f' batch {batch+1} prompt ' + '*'*20 + '\n' + dirty_gen_prompt + '\n' + '*'*20 + f' batch {batch+1} answer ' + '*'*20 + '\n' + batch_dirty_ans + '\n\n\n\n\n\n')
     else:
         # 一次性生成
         dirty_gen_prompt = create_dirty_gen_inst_prompt(filtered_clean, right_values_tmp, wrong_values_tmp, attr, num_errors=num_dirty_to_generate)
-        dirty_gen_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE)
+        dirty_gen_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE, model_type=MODEL_TYPE)
         dirty_gen_prompt_file.write('*'*20 + ' prompt ' + '*'*20 + '\n' + dirty_gen_prompt + '\n' + '*'*20 + ' answer ' + '*'*20 + '\n' + dirty_gen_ans + '\n\n\n\n\n\n')
     
     dirty_gen_prompt_file.close()
@@ -866,7 +868,7 @@ def task_gen_err_data(attr, dirty_csv, index_value_label_dict, related_attrs_dic
     else:
         right_values_tmp = right_values
     err_gen_prompt = create_err_gen_inst_prompt(right_values_tmp, wrong_values_tmp, attr, num_errors=(len(right_values)))
-    err_gen_ans = get_ans_from_llm(err_gen_prompt, api_use=API_USE)
+    err_gen_ans = get_ans_from_llm(err_gen_prompt, api_use=API_USE, model_type=MODEL_TYPE)
     err_gen_prompt_file.write('*'*20 + ' prompt ' + '*'*20 + '\n' + err_gen_prompt + '\n' + '*'*20 + ' answer ' + '*'*20 + '\n' + err_gen_ans + '\n\n\n\n\n\n')
     err_gen_file.write(err_gen_ans)
     err_gen_prompt_file.close()
@@ -955,13 +957,13 @@ def task_gen_enhanced_data(attr, dirty_csv, clean_csv, index_value_label_dict, c
         for batch in range(num_batches):
             batch_size = min(15, num_gen - batch * 15)
             clean_gen_prompt = create_clean_gen_inst_prompt(actual_right_values_tmp, attr, num_gen=batch_size)
-            batch_clean_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE)
+            batch_clean_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE, model_type=MODEL_TYPE)
             clean_gen_ans += batch_clean_ans + "\n\n"
             clean_gen_prompt_file.write('*'*20 + f' batch {batch+1} prompt ' + '*'*20 + '\n' + clean_gen_prompt + '\n' + '*'*20 + f' batch {batch+1} answer ' + '*'*20 + '\n' + batch_clean_ans + '\n\n\n\n\n\n')
     else:
         # 一次性生成
         clean_gen_prompt = create_clean_gen_inst_prompt(actual_right_values_tmp, attr, num_gen=num_gen)
-        clean_gen_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE)
+        clean_gen_ans = get_ans_from_llm(clean_gen_prompt, api_use=API_USE, model_type=MODEL_TYPE)
         clean_gen_prompt_file.write('*'*20 + ' prompt ' + '*'*20 + '\n' + clean_gen_prompt + '\n' + '*'*20 + ' answer ' + '*'*20 + '\n' + clean_gen_ans + '\n\n\n\n\n\n')
     clean_gen_prompt_file.close()
     clean_gen_file.write(clean_gen_ans)
@@ -1002,13 +1004,13 @@ def task_gen_enhanced_data(attr, dirty_csv, clean_csv, index_value_label_dict, c
             clean_for_error_injection = filtered_clean[start_idx:end_idx]
             
             dirty_gen_prompt = create_dirty_gen_inst_prompt(clean_for_error_injection, right_values_tmp, wrong_values_tmp, attr, num_errors=len(clean_for_error_injection))
-            batch_dirty_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE)
+            batch_dirty_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE, model_type=MODEL_TYPE)
             dirty_gen_ans += batch_dirty_ans + "\n\n"
             dirty_gen_prompt_file.write('*'*20 + f' batch {batch+1} prompt ' + '*'*20 + '\n' + dirty_gen_prompt + '\n' + '*'*20 + f' batch {batch+1} answer ' + '*'*20 + '\n' + batch_dirty_ans + '\n\n\n\n\n\n')
     else:
         # 一次性生成
         dirty_gen_prompt = create_dirty_gen_inst_prompt(filtered_clean, right_values_tmp, wrong_values_tmp, attr, num_errors=num_dirty_to_generate)
-        dirty_gen_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE)
+        dirty_gen_ans = get_ans_from_llm(dirty_gen_prompt, api_use=API_USE, model_type=MODEL_TYPE)
         dirty_gen_prompt_file.write('*'*20 + ' prompt ' + '*'*20 + '\n' + dirty_gen_prompt + '\n' + '*'*20 + ' answer ' + '*'*20 + '\n' + dirty_gen_ans + '\n\n\n\n\n\n')
     
     dirty_gen_prompt_file.close()
@@ -1108,7 +1110,7 @@ def task_guide_gen(attr_name, uni_vals, distri_analy_content, prompt_content, gu
     prompt = guide_gen_prompt(attr_name, dataset, uni_vals, dirty_csv, attr_analy_content)
     while True:
         try:
-            res_content = get_ans_from_llm(prompt, api_use=API_USE)
+            res_content = get_ans_from_llm(prompt, api_use=API_USE, model_type=MODEL_TYPE)
             break
         except Exception as eee:
             print(eee, f'while guide_gen {attr_name}')
@@ -1186,7 +1188,7 @@ def task_distri_analys(attr, analyzer, dist_dir):
     output_file = os.path.join(dist_dir, f'ori_distri_analys_{attr}.txt')
     distr_prompt_file = os.path.join(dist_dir, f'prompt_distri_analys_{attr}.txt')
     llm_prompt, examples = analyzer.generate_llm_prompt(attr)
-    llm_response = get_ans_from_llm(llm_prompt, api_use=API_USE)
+    llm_response = get_ans_from_llm(llm_prompt, api_use=API_USE, model_type=MODEL_TYPE)
     analyze_content = analyzer.analyze_data(attr, llm_response, output_file)
     with open(distr_prompt_file, 'w', encoding='utf-8') as f:
         f.write(llm_prompt)
@@ -2255,7 +2257,7 @@ def gen_clean_funcs(attr, dirty_csv, funcs_pre_directory, related_attrs_dict, lo
     if len(sample_rows) == 0:
         logger.error("The Data is EMPTY!!!")
     prompt = pre_func_prompt(attr, sample_rows_str)
-    pre_func_response = get_ans_from_llm(prompt, api_use=API_USE)
+    pre_func_response = get_ans_from_llm(prompt, api_use=API_USE, model_type=MODEL_TYPE)
     flist, _ = extract_func(pre_func_response)
     with open(os.path.join(funcs_pre_directory, f"prompt_pre_funcs_zgen_{attr}.txt"), 'w', encoding='utf-8') as prom_file:
         prom_file.write(prompt)
@@ -2277,6 +2279,7 @@ if __name__ == "__main__":
     config = load_config(args.config)
     
     # Model settings
+    MODEL_TYPE = config['model']['model_type']
     FUNC_VAL_THRESHOLD = config['model']['func_val_threshold']
     n_method = config['model']['n_method']
     API_USE = config['model']['api_use']
@@ -2345,7 +2348,7 @@ if __name__ == "__main__":
             
             date_time = datetime.now().strftime("%m-%d")
             now_time = datetime.now().strftime("%H:%M")
-            resp_path = f"{base_dir}/result/{result_dir}/{date_time} {now_time} {dataset}{err_rate}-{n_method}-set{set_num}-iterations{ITERATIONS}"
+            resp_path = f"{base_dir}/result/{result_dir}/{MODEL_TYPE} {date_time} {now_time} {dataset}{err_rate}-{n_method}-set{set_num}-iterations{ITERATIONS}"
             guide_directory = f'{resp_path}/guide'
             error_checking_res_directory = f'{resp_path}/error_checking'
             funcs_directory = f'{resp_path}/funcs'

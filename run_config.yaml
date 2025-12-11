@@ -1,4 +1,5 @@
 model:
+  model_type: qwen2.5-72b-instruct # qwen3-max  gpt-4o-mini
   iterations: 5
   api_use: true
   pre_func_use: true
@@ -33,7 +34,7 @@ data:
   base_dir: '.'
   err_rate_list: ["01"] #["mixed_err", "typos", "missing_values", "pattern_violations", "rule_violations", "outliers"]
   all_set_num: 1
-  datasets: [ 'hospital'] # 'rayyan', 'flights','billionaire', 'beers'
+  datasets: [ 'flights', ] # 'hospital' 'rayyan', 'billionaire', 'beers'
   err_check_val_num_per_query: 20
   result_dir: 'pipeline'
   
