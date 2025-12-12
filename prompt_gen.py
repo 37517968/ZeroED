@@ -45,6 +45,20 @@ def error_check_prompt(col_values, col_name, expert_labeled_right_dict, expert_l
     
     prompt = ""
     prompt += f"As a data quality expert, please first analyze attribute relations and analyze the '{col_name}' attribute values for potential errors. Ignore case sensitivity\n"
+    if col_name in expert_labeled_right_dict or col_name in expert_labeled_wrong_dict:
+        prompt += f"Below are reference examples for analyzing the correctness of `{col_name}` values.\n"
+        prompt += "**These examples illustrate patterns only. They are NOT an exhaustive list.**\n"
+        prompt += "**Do NOT mark a value as wrong simply because it does not appear in the examples.**\n\n"
+
+    if col_name in expert_labeled_right_dict:
+        prompt += "### Valid example patterns:\n"
+        prompt += json.dumps(expert_labeled_right_dict[col_name], indent=2, ensure_ascii=False)
+        prompt += "\n\n"
+
+    if col_name in expert_labeled_wrong_dict:
+        prompt += "### Wrong example patterns:\n"
+        prompt += json.dumps(expert_labeled_wrong_dict[col_name], indent=2, ensure_ascii=False)
+        prompt += "\n\n"
     prompt += f"Provide your analysis on `{col_name}` values in JSON format as follows, **do not care problems in other attributes**:\n\n"
     prompt += '''
 ```json
