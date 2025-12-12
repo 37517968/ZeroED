@@ -36,7 +36,7 @@ from utility import (Logger, Timer, copy_file, copy_read_files_in_dir,
                      rag_query, split_list_to_sublists, get_read_paths)
 
 
-def subtask_det_initial(val_list, attr_name, indices):
+def subtask_det_initial(val_list, attr_name, indices, expert_labeled_right_dict, expert_labeled_wrong_dict):
     """
     处理LLM标注任务，针对指定的indices
     
@@ -50,7 +50,7 @@ def subtask_det_initial(val_list, attr_name, indices):
     """
     str_list = [str(a_val) for a_val in val_list]
     vals_str = '\n'.join(str_list)
-    prompt = error_check_prompt(vals_str, attr_name)
+    prompt = error_check_prompt(vals_str, attr_name, expert_labeled_right_dict, expert_labeled_wrong_dict)
     if GUIDE_USE:
         response = rag_query(prompt, guide_content[attr_name])
     else:
@@ -1131,7 +1131,7 @@ def task_func_gen(attr_name, err_gen_dict):
         return {attr_name: {'clean': [], 'dirty': []}}
 
 
-def task_det_initial(attr_name, error_checking_res_directory, indices):
+def task_det_initial(attr_name, error_checking_res_directory, indices, expert_labeled_right_dict, expert_labeled_wrong_dict):
     """
     处理特定属性的初始错误检测，针对指定的indices
     
@@ -1160,7 +1160,7 @@ def task_det_initial(attr_name, error_checking_res_directory, indices):
     # 改为单线程处理，便于调试
     for sub_list_values, sub_list_indices in zip(split_values, split_indices):
         try:
-            error_response += subtask_det_initial(sub_list_values, attr_name, sub_list_indices) + '\n'
+            error_response += subtask_det_initial(sub_list_values, attr_name, sub_list_indices, expert_labeled_right_dict, expert_labeled_wrong_dict) + '\n'
         except Exception as e:
             print(f"处理属性 {attr_name} 的子任务时出错: {str(e)}")
             import traceback
@@ -1720,7 +1720,7 @@ def process_error_checking(ERROR_CHECKING_READ, read_error_checking_path, all_at
         # 改为单线程处理，便于调试
         for attr in all_attrs:
             try:
-                task_det_initial(attr, error_checking_res_directory)
+                task_det_initial(attr, error_checking_res_directory, expert_labeled_right_dict, expert_labeled_wrong_dict)
             except Exception as e:
                 print(f"处理属性 {attr} 时出错: {str(e)}")
                 import traceback
@@ -1797,60 +1797,73 @@ def save_label_dict(index_value_label_dict, save_path):
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 def extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict=None):
-    """
-    从LLM标注结果中提取标签，针对指定的indices
-    
-    Args:
-        all_attrs: 所有属性列表
-        error_checking_res_directory: 错误检查结果目录
-        indices_dict: 指定要提取的indices字典，格式为 {attr: [idx1, idx2, ...]}，如果为None则提取所有标签
-    
-    Returns:
-        索引值标签字典
-    """
-    # 如果indices_dict为None，则提取所有标签
     if indices_dict is None:
         return extract_all_llm_label_res(error_checking_res_directory)
-    all_extracted_values = defaultdict(list)
+
+    # 最终结果字典
+    last_status_dict = defaultdict(dict)  # {attr: {value_str: 0/1}}
     index_value_label_dict = defaultdict(list)
-    
+
     for attr in all_attrs:
-        content = ""
-        with open(os.path.join(error_checking_res_directory, f'error_checking_{attr}.txt'), 'r', encoding='utf-8') as f:
+        file_path = os.path.join(error_checking_res_directory, f'error_checking_{attr}.txt')
+        if not os.path.exists(file_path):
+            continue
+
+        # 读取内容
+        with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
         content = content.replace('\\+', '').replace('\\n', '\n')
-        
-        # 提取错误值
+
+        # 正确/错误模式
         wrong_pattern = err_pat_in_text_attr(attr)
-        matches = re.finditer(wrong_pattern, content)
-        all_extracted_values[attr].extend([match.group(1).replace("':'", "': '").replace(',', ', ').replace(',  ', ', ').replace('"', "'") for match in matches])
-        all_extracted_values[attr] = [normalize_string(match).replace('"{', '{', 1)[:-1] for match in all_extracted_values[attr]]
-        all_extracted_values[attr] = list(set(all_extracted_values[attr]))
-        
-        # 处理冲突值
         right_pattern = right_pat_in_text_attr(attr)
-        right_matches = re.finditer(right_pattern, content)
-        right_matches = [match.group(1).replace("':'", "': '").replace(',', ', ').replace(',  ', ', ').replace('"', "'") for match in right_matches]
-        right_matches = [normalize_string(match).replace('"{', '{', 1)[:-1] for match in right_matches]
-        all_extracted_values[attr] = [extr_vals for extr_vals in all_extracted_values[attr] if extr_vals not in right_matches]
-    
-    # 使用指定的indices
+
+        # 按出现顺序扫描（一个 content 上执行两个模式的混合扫描）
+        events = []
+
+        for m in re.finditer(wrong_pattern, content):
+            text = normalize_string(
+                m.group(1).replace("':'", "': '").replace(',', ', ').replace(',  ', ', ').replace('"', "'")
+            ).replace('"{', '{', 1)[:-1]
+            events.append((m.start(), text, 1))  # 1 = wrong
+
+        for m in re.finditer(right_pattern, content):
+            text = normalize_string(
+                m.group(1).replace("':'", "': '").replace(',', ', ').replace(',  ', ', ').replace('"', "'")
+            ).replace('"{', '{', 1)[:-1]
+            events.append((m.start(), text, 0))  # 0 = right
+
+        # 按位置排序，让先出现的在前，后出现的在后
+        events.sort(key=lambda x: x[0])
+
+        # 记录最后出现的状态
+        for _, value_str, status in events:
+            last_status_dict[attr][value_str] = status  # 后出现覆盖前出现
+
+    # --- 将 last_status_dict 应用到 indices_dict ---
     for attr in all_attrs:
         if attr in indices_dict:
             indices = indices_dict[attr]
             temp_list = []
+
             for idx in indices:
-                # 获取该索引处的值
                 related_attrs = list(related_attrs_dict[attr])
                 value = dirty_csv.loc[idx, [attr] + related_attrs].to_dict()
-                # 检查该值是否在错误值列表中
-                if normalize_string(str(value)) in all_extracted_values[attr]:
-                    temp_list.append((idx, value, 1))
-                else:
-                    temp_list.append((idx, value, 0))
+
+                norm_value = normalize_string(str(value))
+
+                # 默认认为正确（0）
+                status = last_status_dict[attr].get(norm_value, 0)
+
+                temp_list.append((idx, value, status))
+
             index_value_label_dict[attr] = temp_list
-    save_label_dict(index_value_label_dict, os.path.join(error_checking_res_directory, f'llm_label_result.txt'))
+
+    save_label_dict(index_value_label_dict,
+                    os.path.join(error_checking_res_directory, 'llm_label_result.txt'))
+
     return index_value_label_dict
+
 
 
 def extract_all_llm_label_res(error_checking_res_directory):
@@ -1995,6 +2008,29 @@ def select_expert_labeled_data(
     expert_labeled_number = expert_labeled_number + sum(len(v) for v in expert_to_label_dict.values())
     # 最后兜底：如果 1 条都选不下，返回空
     return expert_to_label_dict, expert_labeled_number
+
+def group_expert_labeled(wrong_values, right_values, actual_right_values, expert_labeled_wrong_dict, expert_labeled_right_dict):
+    # ----------- helper：按第一个字段名加入对应 dict -----------
+    def add_to_group(target_dict, record):
+        first_key = next(iter(record.keys()))  # 第一个键
+        if first_key not in target_dict:
+            target_dict[first_key] = []
+        target_dict[first_key].append(record)
+
+    # ------------ 处理 wrong_values -------------
+    for rec in wrong_values:
+        add_to_group(expert_labeled_wrong_dict, rec)
+
+    # ------------ 处理 right_values -------------
+    for rec in right_values:
+        add_to_group(expert_labeled_right_dict, rec)
+
+    # ------------ 处理 actual_right_values -------------
+    for rec in actual_right_values:
+        add_to_group(expert_labeled_right_dict, rec)
+
+    return expert_labeled_wrong_dict, expert_labeled_right_dict
+
 
 def print_prediction_errors(dirty_csv, clean_csv, det_wrong_list_res, all_attrs, related_attrs_dict, logger):
     """
@@ -2428,7 +2464,8 @@ if __name__ == "__main__":
             # 初始化之前选择过的聚类字典
             previously_selected_clusters = {}
             expert_labeled_dict = defaultdict(list)
-
+            expert_labeled_wrong_dict = {}
+            expert_labeled_right_dict = {}
             for i in range(iterations):
                 indices_dict = {}                
                 # 准备indices字典
@@ -2464,7 +2501,7 @@ if __name__ == "__main__":
                         # 使用未标注的索引进行标注
                         for attr_name, unlabeled_indices in unlabeled_indices_dict.items():
                             if len(unlabeled_indices) > 0:  # 只有当有未标注的索引时才进行标注
-                                task_det_initial(attr_name, error_checking_res_directory, unlabeled_indices)
+                                task_det_initial(attr_name, error_checking_res_directory, unlabeled_indices, expert_labeled_right_dict, expert_labeled_wrong_dict)
                 total_time += t.duration
                 expert_wrong_values, expert_right_values = [], []
                 with Timer('Extract Labeling Results', logger, time_file) as t:
@@ -2511,38 +2548,11 @@ if __name__ == "__main__":
                     expert_to_label_dict, expert_labeled_number = select_expert_labeled_data(inconsistent_index_value_label_dict, expert_labeled_dict, expert_labeled_number, max_expert_labels, max_per_attr_start)
                     # 将不一致的标注索引保存到expert_labeled_indices文件中
                     save_inconsistent_indices(expert_to_label_dict, expert_labeled_directory)
-                # 将当前迭代的标注结果累积到总结果中
-                for attr, label_list in current_index_value_label_dict.items():
-                    # 创建一个集合来跟踪已经添加的索引，避免重复
-                    existing_indices = {idx for idx, _, _ in index_value_label_dict[attr]}
-                    for idx, value, label in label_list:
-                        # 只有当索引不存在时才添加
-                        if idx not in existing_indices:
-                            index_value_label_dict[attr].append((idx, value, label))
-                            existing_indices.add(idx)
                 
-                measure_status = 'Not Done'
-                with Timer('Evaluating LLM Labeling', logger, time_file) as t:
-                    measure_status = measure_llm_label(resp_path, clean_csv, all_attrs, related_attrs_dict, gt_wrong_dict, index_value_label_dict)
-                total_time += t.duration
 
                 
                 
-                # 初始化det_wrong_list和det_right_list
-                det_wrong_list = []
-                det_right_list = []
-                for attr, label_list in index_value_label_dict.items():
-                    for idx, value, label in label_list:
-                        if label == 1:
-                            det_wrong_list.append((idx, attr))
-                        elif label == 0:
-                            det_right_list.append((idx, attr))
                 
-                if (i == 0):
-                    err_gen_dict, funcs_for_attr = {}, {}
-                    with Timer('Generating Functions', logger, time_file) as t:
-                        err_gen_dict, funcs_for_attr = process_gen_err_funcs(FUNC_USE, FUNC_READ, read_path, read_func_path, read_error_path, resp_path, funcs_directory, dirty_csv, all_attrs, para_file, related_attrs_dict, center_index_value_label_dict, det_wrong_list, det_right_list)
-                    total_time += t.duration
                 
 
                 with Timer('Generating Enhanced Data', logger, time_file) as t:
@@ -2567,15 +2577,48 @@ if __name__ == "__main__":
                             wrong_values, right_values, actual_right_values = prepare_enhanced_data_values(
                                 attr, dirty_csv, clean_csv, expert_to_label_dict, related_attrs_dict, index_value_label_dict
                             )
+                            if len(wrong_values) == 0 and len(right_values) == 0 and len(actual_right_values) == 0:
+                                continue
+                            group_expert_labeled(wrong_values, right_values, actual_right_values, expert_labeled_wrong_dict, expert_labeled_right_dict)
                             save_expert_labeled_data(wrong_values, right_values, actual_right_values, expert_labeled_directory)
-                            
+                            task_det_initial(attr, error_checking_res_directory, unlabeled_indices_dict[attr], expert_labeled_right_dict, expert_labeled_wrong_dict)
+
                             # 调用生成增强数据的方法
                             generate_enhanced_data_from_values(
                                 attr, related_attrs_dict, enhanced_gen_dict, 
                                 wrong_values, right_values, actual_right_values, 30
                             )
+                        current_index_value_label_dict = extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict)
 
+                # 将当前迭代的标注结果累积到总结果中
+                for attr, label_list in current_index_value_label_dict.items():
+                    # 创建一个集合来跟踪已经添加的索引，避免重复
+                    existing_indices = {idx for idx, _, _ in index_value_label_dict[attr]}
+                    for idx, value, label in label_list:
+                        # 只有当索引不存在时才添加
+                        if idx not in existing_indices:
+                            index_value_label_dict[attr].append((idx, value, label))
+                            existing_indices.add(idx)
+                
+                # 初始化det_wrong_list和det_right_list
+                det_wrong_list = []
+                det_right_list = []
+                for attr, label_list in index_value_label_dict.items():
+                    for idx, value, label in label_list:
+                        if label == 1:
+                            det_wrong_list.append((idx, attr))
+                        elif label == 0:
+                            det_right_list.append((idx, attr))
+                
+                if (i == 0):
+                    err_gen_dict, funcs_for_attr = {}, {}
+                    with Timer('Generating Functions', logger, time_file) as t:
+                        err_gen_dict, funcs_for_attr = process_gen_err_funcs(FUNC_USE, FUNC_READ, read_path, read_func_path, read_error_path, resp_path, funcs_directory, dirty_csv, all_attrs, para_file, related_attrs_dict, center_index_value_label_dict, det_wrong_list, det_right_list)
+                    total_time += t.duration
 
+                measure_status = 'Not Done'
+                with Timer('Evaluating LLM Labeling', logger, time_file) as t:
+                    measure_status = measure_llm_label(resp_path, clean_csv, all_attrs, related_attrs_dict, gt_wrong_dict, index_value_label_dict)
                 
 
                 total_time += t.duration
