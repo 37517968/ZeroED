@@ -32,7 +32,7 @@ def kb_gen_prompt(attr_name, dataset_name, idx_list, dirty_csv, attr_analy_conte
     return prompt
 
 
-def error_check_prompt(col_values, col_name):
+def error_check_prompt(col_values, col_name, expert_labeled_right_dict, expert_labeled_wrong_dict):
     lines = col_values.strip().split('\n')
     try:
         col_list = re.findall(r'"([^"]+)"\s*:', lines[0])
@@ -77,6 +77,23 @@ def error_check_prompt(col_values, col_name):
     prompt += f"Values of column '{col_name}' along with related attribute values:\n"
     prompt += f"'{col_values}'\n"
     prompt += f"Provide your analysis on `{col_name}` values in the required JSON format, **do not care problems in other attributes**:\n"
+    # ---------------------------------------------------------
+    # 新增部分：加入 expert_labeled_right_dict / wrong_dict 示例
+    # ---------------------------------------------------------
+
+    # 1. 加入正确示例
+    if col_name in expert_labeled_right_dict:
+        prompt += "-----------------------------------------------\n"
+        prompt += f"Here are some valid reference examples for `{col_name}` from previous expert labels:\n"
+        prompt += json.dumps(expert_labeled_right_dict[col_name], indent=2, ensure_ascii=False)
+        prompt += "\n\n"
+
+    # 2. 加入错误示例
+    if col_name in expert_labeled_wrong_dict:
+        prompt += "-----------------------------------------------\n"
+        prompt += f"Here are some previously identified *wrong cases* involving `{col_name}` for your reference:\n"
+        prompt += json.dumps(expert_labeled_wrong_dict[col_name], indent=2, ensure_ascii=False)
+        prompt += "\n\n"
     return prompt
 
 
