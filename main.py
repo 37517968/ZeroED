@@ -55,7 +55,7 @@ def subtask_det_initial(val_list, attr_name, indices, expert_labeled_right_dict,
         response = rag_query(prompt, guide_content[attr_name])
     else:
         response = query_base(prompt)
-    
+    response = fix_error_flags(response)
     # 保存提示和响应，同时保存indices信息
     error_check_prompt_file = open(os.path.join(error_checking_res_directory, f'prompt_error_checking_{attr_name}.txt'), 'a', encoding='utf-8')
     error_check_prompt_file.write(prompt + '\n\n')
@@ -128,8 +128,8 @@ def extract_enhanced_info(text, attr):
     attr_name = attr
     lines = text.split('\n')
     for line in lines:
-        if "_val_" in line or "_value_" in line:
-            continue
+        # if "_val_" in line or "_value_" in line:
+        #     continue
         err_info = []
         match = re.search(r'\[(.*?)\]', line)
         if match:
@@ -143,7 +143,15 @@ def extract_enhanced_info(text, attr):
                     if i != len(parsed_data) - 1 and i != 0:
                         err_info.append(str(content))
                     elif i == len(parsed_data) - 1:
-                        err_info.append(content)
+                        if isinstance(content, dict):
+                            # 替换字典中 attr_name 对应的 key
+                            if attr_name in content:
+                                content[attr_name] = err_info[1] if len(err_info) > 1 else content[attr_name]
+                            # 只要字典中没有包含 _val_ 或 _value_ 的值，就保留
+                            if not any('_val_' in str(v) or '_value_' in str(v) for v in content.values()):
+                                err_info.append(content)
+                        else:
+                            err_info.append(content)
             except Exception as e:
                 print("\n\nWhen processing error_err_info_enhanced():" + line + "--" + attr)
                 print(e)
@@ -680,7 +688,7 @@ def generate_enhanced_data_from_values(attr, related_attrs_dict, enhanced_gen_di
     filtered_dirty.extend(wrong_values)
     for dirty in dirty_info:
         try:
-            if len(dirty) < 4 or len(dirty[3]) == 0 or not isinstance(dirty[3], dict) or len(dirty[3].keys()) < len([attr]+related_attrs) :
+            if len(dirty) < 4 or len(dirty[3]) == 0 or not isinstance(dirty[3], dict) or len(dirty[3].keys()) < len([attr]+related_attrs) or "no error" in dirty[2].lower():
                 continue
             if dirty[0] in all_attrs and str(dirty[-1]).strip() not in right_values and str(
                     dirty[-1]).strip() not in wrong_values:
@@ -1165,6 +1173,23 @@ def task_det_initial(attr_name, error_checking_res_directory, indices, expert_la
             print(f"处理属性 {attr_name} 的子任务时出错: {str(e)}")
             import traceback
             traceback.print_exc()
+
+def fix_error_flags(response_str):
+    lines = response_str.splitlines()
+    fixed_lines = lines.copy()
+
+    for i in range(len(lines) - 1):
+        line1 = lines[i]
+        line2 = lines[i + 1]
+
+        # 检查第一行 error_analysis 包含 not match 或 duplicate
+        if '"error_analysis"' in line1 and re.search(r'not match|duplicate', line1, re.IGNORECASE):
+            # 检查第二行 has_error_in_XXX 为 true
+            if re.search(r'"has_error_in_[^"]+"\s*:\s*true', line2, re.IGNORECASE):
+                # 将 true 改为 false
+                fixed_lines[i + 1] = re.sub(r'\btrue\b', 'false', line2, flags=re.IGNORECASE)
+
+    return "\n".join(fixed_lines)
 
 
 def normalize_string(s):
@@ -1859,8 +1884,7 @@ def extract_llm_label_res(all_attrs, error_checking_res_directory, indices_dict=
 
             index_value_label_dict[attr] = temp_list
 
-    save_label_dict(index_value_label_dict,
-                    os.path.join(error_checking_res_directory, 'llm_label_result.txt'))
+    
 
     return index_value_label_dict
 
@@ -2649,6 +2673,11 @@ if __name__ == "__main__":
                 clean_count = len(data['clean'])
                 dirty_count = len(data['dirty'])
                 para_file.write(f"{attr}: clean_data_count={clean_count}, dirty_data_count={dirty_count}\n")
+
+            # 将最终的LLM标注结果保存到文件
+            save_label_dict(index_value_label_dict,
+                    os.path.join(error_checking_res_directory, 'llm_label_result.txt'))
+
             with Timer('Label Propagation', logger, time_file) as t:
                 det_wrong_list, det_right_list = label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, index_value_label_dict, LABEL_PROP)
             total_time += t.duration

@@ -83,9 +83,9 @@ def error_check_prompt(col_values, col_name, expert_labeled_right_dict, expert_l
 ```
 \n\n'''
     prompt += "If unsure, do not indicate an error.\n"
-    prompt += "- Please ignore the case sensitivity issues.\n\n"
+    prompt += "- Do NOT mark a value as an error solely because it is unfamiliar, unseen before, or not present in examples.\n"
+    prompt += "- Ignore the case sensitivity issues.\n\n"
     prompt += "- Do not check for data type errors because they have all been converted to string type.\n\n"
-    prompt += "- You must NOT report any issues that involve string-vs-type interpretation or type mismatch.\n\n"
     prompt += "-----------------------------------------------\n\n"
     prompt += "Here are the given inputs:\n"
     prompt += f"Values of column '{col_name}' along with related attribute values:\n"
@@ -144,7 +144,7 @@ For the following clean values:
 Generate **{num_errors} erroneous versions per clean value**, ensuring:
 - For each clean value, generate a corresponding erroneous value (one-to-one mapping), rather than reusing or copying any provided dirty sample.
 - Errors follow the learned transformation patterns.
-- Each error value is unique and differs from the clean value.
+- Each error value differs from the clean value.
 - The general data type and structure remain valid.
 ----------------------------------------------------------
 ### 3. Output Format (strict)
