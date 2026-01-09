@@ -37,6 +37,18 @@ from utility import (Logger, Timer, copy_file,
 
 # ==================== 新增辅助函数 ====================
 
+class NumpyEncoder(json.JSONEncoder):
+    """自定义JSON编码器，处理numpy类型"""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
+
+
 def sigmoid(x):
     """Sigmoid函数"""
     return 1 / (1 + np.exp(-np.clip(x, -500, 500)))
@@ -411,9 +423,19 @@ def extract_labels_from_responses(attr_name, responses_with_indices, dirty_csv, 
 
 
 def extract_func(text_content):
+    # 确保text_content是字符串类型
+    if text_content is None:
+        return [], []
+    if not isinstance(text_content, str):
+        try:
+            text_content = str(text_content)
+        except Exception as e:
+            print(f"Cannot convert text_content to string: {e}")
+            return [], []
+    
     try:
         code_blocks = re.findall(r'```(.*?)```', text_content, re.DOTALL)
-    except re.error as e:
+    except (re.error, TypeError) as e:
         print(f"Regex error: {e}")
         return [], []
     clean_func_list = []
@@ -434,14 +456,33 @@ def extract_func(text_content):
 
 def gen_dirty_funcs(attr, clean_info, errs_info, api_use, model_type):
     dirty_str = "\n"
-    clean_info = '\n'.join([str(i) for i in clean_info])
+    
+    # 确保clean_info是可迭代的列表
+    if clean_info is None:
+        clean_info = []
+    if not isinstance(clean_info, (list, tuple)):
+        clean_info = [clean_info]
+    clean_info_str = '\n'.join([str(i) for i in clean_info if i is not None])
+    
+    # 确保errs_info是可迭代的列表
+    if errs_info is None:
+        errs_info = []
+    if not isinstance(errs_info, (list, tuple)):
+        errs_info = [errs_info]
+    
     try:
-        dirty_str = dirty_str + '\n'.join([str(i) for i in errs_info])
+        dirty_str = dirty_str + '\n'.join([str(i) for i in errs_info if i is not None])
     except Exception as e:
         print(f"Error: {e}\n When handling {errs_info}\n")
         dirty_str = dirty_str + str(errs_info) + "\n"
-    func_gen_prompt = err_clean_func_prompt(attr, clean_info, dirty_str)
+    
+    func_gen_prompt = err_clean_func_prompt(attr, clean_info_str, dirty_str)
     llm_gen_func = get_ans_from_llm(func_gen_prompt, api_use=api_use, model_type=model_type)
+    
+    # 确保llm_gen_func是字符串
+    if llm_gen_func is None:
+        llm_gen_func = ""
+    
     temp_clean_flist, dirty_flist = extract_func(llm_gen_func)
     return temp_clean_flist, dirty_flist, func_gen_prompt, llm_gen_func
 
@@ -465,13 +506,21 @@ def gen_err_funcs(attr, high_confidence_right_dict, high_confidence_wrong_dict, 
     wrong_values = []
     right_values = []
     
-    # 从高置信度字典获取数据
+    # 从高置信度字典获取数据，确保数据有效
     if attr in high_confidence_wrong_dict:
-        wrong_values = list(high_confidence_wrong_dict[attr])
+        wrong_values = [v for v in high_confidence_wrong_dict[attr] if v is not None]
     if attr in high_confidence_right_dict:
-        right_values = list(high_confidence_right_dict[attr])
+        right_values = [v for v in high_confidence_right_dict[attr] if v is not None]
     
-    filtered_error = [str(vals) for vals in wrong_values]
+    # 将值转换为字符串，处理可能的异常
+    filtered_error = []
+    for vals in wrong_values:
+        try:
+            filtered_error.append(str(vals))
+        except Exception as e:
+            print(f"Warning: Cannot convert value to string: {e}")
+            continue
+    
     if len(filtered_error) == 0:
         return False
     
@@ -1393,8 +1442,6 @@ if __name__ == "__main__":
                     labeled_number += sum(len(indices) for indices in indices_dict.values())
             total_time += t.duration
             
-            # TODO 如果开启了result_analyze，则将训练集的变化都保存为文件，先按初始和迭代分，再按列分，再按right和wrong分。其中将初始训练集的构建（再带上其对应的LLM标注一致性分数和确实的计算公式如4/5），每轮迭代时新加入训练集的值（带上confidence及其以数字代入的具体的计算公式），每轮迭代时新移除的训练集的值（带上train_confidence及其以数字代入的具体的计算公式），每轮迭代时新加入高置信度类的值（带上train_confidence及其以数字代入的具体的计算公式）
-
             # ==================== 步骤6: 根据一致性构建初始训练集 ====================
             logger.info("根据LLM标注一致性构建初始训练集")
             with Timer('Building Initial Training Set', logger, time_file) as t:
@@ -1413,6 +1460,50 @@ if __name__ == "__main__":
                 
                 logger.info(f"初始训练集总样本数: {total_train_samples}")
                 para_file.write(f"Initial training samples: {total_train_samples}\n")
+                
+                # 如果开启了result_analyze，保存初始训练集的详细信息
+                if RESULT_ANALYZE:
+                    train_change_dir = os.path.join(resp_path, 'train_set_changes')
+                    os.makedirs(train_change_dir, exist_ok=True)
+                    
+                    initial_train_data = {'phase': 'initial', 'data': {}}
+                    for attr in all_attrs:
+                        related_attrs = list(related_attrs_dict[attr])
+                        initial_train_data['data'][attr] = {'right': [], 'wrong': []}
+                        
+                        # 保存right样本及其LLM一致性分数
+                        for idx, value in train_data_dict[attr]['right']:
+                            label_history = index_value_label_history[attr].get(idx, [])
+                            consistency, majority_label = calculate_llm_consistency(label_history)
+                            majority_count = sum(1 for l in label_history if l == majority_label)
+                            total_count = len(label_history)
+                            initial_train_data['data'][attr]['right'].append({
+                                'idx': int(idx),
+                                'value': value,
+                                'llm_consistency': consistency,
+                                'consistency_formula': f"{majority_count}/{total_count}",
+                                'label_history': label_history
+                            })
+                        
+                        # 保存wrong样本及其LLM一致性分数
+                        for idx, value in train_data_dict[attr]['wrong']:
+                            label_history = index_value_label_history[attr].get(idx, [])
+                            consistency, majority_label = calculate_llm_consistency(label_history)
+                            majority_count = sum(1 for l in label_history if l == majority_label)
+                            total_count = len(label_history)
+                            initial_train_data['data'][attr]['wrong'].append({
+                                'idx': int(idx),
+                                'value': value,
+                                'llm_consistency': consistency,
+                                'consistency_formula': f"{majority_count}/{total_count}",
+                                'label_history': label_history
+                            })
+                    
+                    # 保存初始训练集
+                    initial_file = os.path.join(train_change_dir, 'initial_train_set.json')
+                    with open(initial_file, 'w', encoding='utf-8') as f:
+                        json.dump(initial_train_data, f, ensure_ascii=False, indent=2)
+                    logger.info(f"初始训练集详细信息已保存到: {initial_file}")
             total_time += t.duration
             
             # ==================== 步骤7: 初始模型训练 ====================
@@ -1457,6 +1548,10 @@ if __name__ == "__main__":
             for iteration in range(ITERATIONS):
                 logger.info(f"\n{'='*50} 迭代 {iteration + 1}/{ITERATIONS} {'='*50}")
                 para_file.write(f"\n--- Iteration {iteration + 1} ---\n")
+                
+                # 初始化本轮迭代的训练集变化记录
+                if RESULT_ANALYZE:
+                    iteration_train_changes = defaultdict(dict)
                 
                 # ========== 8.1 选择最优聚类 ==========
                 with Timer(f'Iteration {iteration+1} - Select Optimal Cluster', logger, time_file) as t:
@@ -1621,14 +1716,45 @@ if __name__ == "__main__":
                             
                             # 根据置信度分类：高于高置信度阈值的加入训练数据
                             if confidence >= TRAIN_HIGH_CONFIDENCE_THRESHOLD:
+                                # 构建置信度计算公式字符串
+                                conf_formula = f"{w_cls}*{classifier_confidence:.4f} + {w_llm}*{llm_consistency:.4f} + {w_agree}*{is_agree} + {w_count}*{count_confidence:.4f} = {confidence:.4f}"
+                                
                                 if llm_majority_label == 1:
                                     if (idx, value) not in train_data_dict[attr]['wrong']:
                                         train_data_dict[attr]['wrong'].append((idx, value))
                                         new_high_conf_samples += 1
+                                        # 记录新加入的样本
+                                        if RESULT_ANALYZE:
+                                            if 'added_wrong' not in iteration_train_changes[attr]:
+                                                iteration_train_changes[attr]['added_wrong'] = []
+                                            iteration_train_changes[attr]['added_wrong'].append({
+                                                'idx': int(idx),
+                                                'value': value,
+                                                'confidence': confidence,
+                                                'confidence_formula': conf_formula,
+                                                'llm_consistency': llm_consistency,
+                                                'classifier_confidence': classifier_confidence,
+                                                'is_agree': is_agree,
+                                                'count_confidence': count_confidence
+                                            })
                                 else:
                                     if (idx, value) not in train_data_dict[attr]['right']:
                                         train_data_dict[attr]['right'].append((idx, value))
                                         new_high_conf_samples += 1
+                                        # 记录新加入的样本
+                                        if RESULT_ANALYZE:
+                                            if 'added_right' not in iteration_train_changes[attr]:
+                                                iteration_train_changes[attr]['added_right'] = []
+                                            iteration_train_changes[attr]['added_right'].append({
+                                                'idx': int(idx),
+                                                'value': value,
+                                                'confidence': confidence,
+                                                'confidence_formula': conf_formula,
+                                                'llm_consistency': llm_consistency,
+                                                'classifier_confidence': classifier_confidence,
+                                                'is_agree': is_agree,
+                                                'count_confidence': count_confidence
+                                            })
 
                     
                     logger.info(f"新增高置信度样本: {new_high_conf_samples}")
@@ -1687,15 +1813,43 @@ if __name__ == "__main__":
                                     # 计算训练数据置信度
                                     train_confidence = calculate_training_confidence(current_proba, stability, alpha_stab)
                                     
+                                    # 构建train_confidence计算公式字符串
+                                    normalized_pred_conf = 2 * abs(current_proba - 0.5)
+                                    train_conf_formula = f"{alpha_stab}*2*|{current_proba:.4f}-0.5| + {1-alpha_stab}*{stability:.4f} = {alpha_stab}*{normalized_pred_conf:.4f} + {1-alpha_stab}*{stability:.4f} = {train_confidence:.4f}"
+                                    
                                     # 根据置信度分类
                                     if train_confidence < MID_CONFIDENCE_THRESHOLD:
                                         # 低置信度样本移除
                                         samples_to_remove_right.append((idx, value))
                                         low_conf_removed += 1
+                                        # 记录移除的样本
+                                        if RESULT_ANALYZE:
+                                            if 'removed_right' not in iteration_train_changes[attr]:
+                                                iteration_train_changes[attr]['removed_right'] = []
+                                            iteration_train_changes[attr]['removed_right'].append({
+                                                'idx': int(idx),
+                                                'value': value,
+                                                'train_confidence': train_confidence,
+                                                'train_confidence_formula': train_conf_formula,
+                                                'stability': stability,
+                                                'current_proba': current_proba
+                                            })
                                     elif train_confidence >= HIGH_CONFIDENCE_THRESHOLD:
                                         # 高置信度样本加入高置信度词典（去重）
                                         if value not in high_confidence_right_dict[attr]:
                                             high_confidence_right_dict[attr].append(value)
+                                            # 记录新加入高置信度类的样本
+                                            if RESULT_ANALYZE:
+                                                if 'new_high_conf_right' not in iteration_train_changes[attr]:
+                                                    iteration_train_changes[attr]['new_high_conf_right'] = []
+                                                iteration_train_changes[attr]['new_high_conf_right'].append({
+                                                    'idx': int(idx),
+                                                    'value': value,
+                                                    'train_confidence': train_confidence,
+                                                    'train_confidence_formula': train_conf_formula,
+                                                    'stability': stability,
+                                                    'current_proba': current_proba
+                                                })
                                     else:
                                         # 中等置信度样本加入中置信度词典（去重）
                                         if value not in mid_confidence_right_dict[attr]:
@@ -1711,15 +1865,43 @@ if __name__ == "__main__":
                                     
                                     train_confidence = calculate_training_confidence(current_proba, stability, alpha_stab)
                                     
+                                    # 构建train_confidence计算公式字符串
+                                    normalized_pred_conf = 2 * abs(current_proba - 0.5)
+                                    train_conf_formula = f"{alpha_stab}*2*|{current_proba:.4f}-0.5| + {1-alpha_stab}*{stability:.4f} = {alpha_stab}*{normalized_pred_conf:.4f} + {1-alpha_stab}*{stability:.4f} = {train_confidence:.4f}"
+                                    
                                     # 根据置信度分类
                                     if train_confidence < MID_CONFIDENCE_THRESHOLD:
                                         # 低置信度样本移除
                                         samples_to_remove_wrong.append((idx, value))
                                         low_conf_removed += 1
+                                        # 记录移除的样本
+                                        if RESULT_ANALYZE:
+                                            if 'removed_wrong' not in iteration_train_changes[attr]:
+                                                iteration_train_changes[attr]['removed_wrong'] = []
+                                            iteration_train_changes[attr]['removed_wrong'].append({
+                                                'idx': int(idx),
+                                                'value': value,
+                                                'train_confidence': train_confidence,
+                                                'train_confidence_formula': train_conf_formula,
+                                                'stability': stability,
+                                                'current_proba': current_proba
+                                            })
                                     elif train_confidence >= HIGH_CONFIDENCE_THRESHOLD:
                                         # 高置信度样本加入高置信度词典（去重）
                                         if value not in high_confidence_wrong_dict[attr]:
                                             high_confidence_wrong_dict[attr].append(value)
+                                            # 记录新加入高置信度类的样本
+                                            if RESULT_ANALYZE:
+                                                if 'new_high_conf_wrong' not in iteration_train_changes[attr]:
+                                                    iteration_train_changes[attr]['new_high_conf_wrong'] = []
+                                                iteration_train_changes[attr]['new_high_conf_wrong'].append({
+                                                    'idx': int(idx),
+                                                    'value': value,
+                                                    'train_confidence': train_confidence,
+                                                    'train_confidence_formula': train_conf_formula,
+                                                    'stability': stability,
+                                                    'current_proba': current_proba
+                                                })
                                     else:
                                         # 中等置信度样本加入中置信度词典（去重）
                                         if value not in mid_confidence_wrong_dict[attr]:
@@ -1833,11 +2015,31 @@ if __name__ == "__main__":
                     
                     logger.info(f"迭代 {iteration + 1} 分析结果已保存到: {iteration_file}")
                     logger.info(f"  误分类样本数: {len(iteration_result['misclassified_samples'])}")
+                    
+                    # 保存训练集变化到文件
+                    train_change_dir = os.path.join(resp_path, 'train_set_changes')
+                    os.makedirs(train_change_dir, exist_ok=True)
+                    
+                    iteration_changes = {
+                        'iteration': iteration + 1,
+                        'changes': dict(iteration_train_changes)
+                    }
+                    
+                    changes_file = os.path.join(train_change_dir, f'iteration_{iteration + 1}_train_changes.json')
+                    with open(changes_file, 'w', encoding='utf-8') as f:
+                        json.dump(iteration_changes, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+                    
+                    # 统计变化数量
+                    total_added = sum(len(iteration_train_changes[attr].get('added_right', [])) + len(iteration_train_changes[attr].get('added_wrong', [])) for attr in iteration_train_changes)
+                    total_removed = sum(len(iteration_train_changes[attr].get('removed_right', [])) + len(iteration_train_changes[attr].get('removed_wrong', [])) for attr in iteration_train_changes)
+                    total_new_high_conf = sum(len(iteration_train_changes[attr].get('new_high_conf_right', [])) + len(iteration_train_changes[attr].get('new_high_conf_wrong', [])) for attr in iteration_train_changes)
+                    
+                    logger.info(f"  训练集变化已保存到: {changes_file}")
+                    logger.info(f"  新加入训练集: {total_added}, 移除: {total_removed}, 新高置信度: {total_new_high_conf}")
 
             # ==================== 步骤9: 根据高置信度样本生成函数 ====================
             logger.info("根据高置信度样本生成函数")
             with Timer('Generating Functions from High Confidence Samples', logger, time_file) as t:
-                # TODO 这部分可能报错expected string or bytes-like object Traceback (most recent call last) 帮我修复它，确保不会报错
                 err_gen_dict, funcs_for_attr = process_gen_err_funcs(
                     FUNC_USE, resp_path, funcs_directory, dirty_csv, all_attrs,
                     para_file, related_attrs_dict, high_confidence_right_dict, high_confidence_wrong_dict, API_USE, MODEL_TYPE

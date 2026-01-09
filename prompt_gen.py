@@ -44,21 +44,11 @@ def error_check_prompt(col_values, col_name, expert_labeled_right_dict, expert_l
     template_dict_2 = {key: f'{key}_example_val_2' for key in col_list}
     
     prompt = ""
-    prompt += f"As a data quality expert, please first analyze attribute relations and analyze the '{col_name}' attribute values for potential errors. Ignore case sensitivity\n"
-    if col_name in expert_labeled_right_dict or col_name in expert_labeled_wrong_dict:
-        prompt += f"Below are reference examples for analyzing the correctness of `{col_name}` values.\n"
-        prompt += "**These examples illustrate patterns only. They are NOT an exhaustive list.**\n"
-        prompt += "**Do NOT mark a value as wrong simply because it does not appear in the examples.**\n\n"
-
-    if col_name in expert_labeled_right_dict:
-        prompt += "### Valid example patterns:\n"
-        prompt += json.dumps(expert_labeled_right_dict[col_name], indent=2, ensure_ascii=False)
-        prompt += "\n\n"
-
-    if col_name in expert_labeled_wrong_dict:
-        prompt += "### Wrong example patterns:\n"
-        prompt += json.dumps(expert_labeled_wrong_dict[col_name], indent=2, ensure_ascii=False)
-        prompt += "\n\n"
+    prompt += f"As a data quality expert, please first analyze attribute relations and analyze the '{col_name}' attribute values for potential errors. \n"
+    prompt += "-----------------------------------------------\n\n"
+    prompt += "Here are the given inputs:\n"
+    prompt += f"Values of column '{col_name}' along with related attribute values:\n"
+    prompt += f"'{col_values}'\n"
     prompt += f"Provide your analysis on `{col_name}` values in JSON format as follows, **do not care problems in other attributes**:\n\n"
     prompt += '''
 ```json
@@ -82,32 +72,27 @@ def error_check_prompt(col_values, col_name, expert_labeled_right_dict, expert_l
 }
 ```
 \n\n'''
-    prompt += "If unsure, do not indicate an error.\n"
-    prompt += "- Do NOT mark a value as an error solely because it is unfamiliar, unseen before, or not present in examples.\n"
-    prompt += "- Ignore the case sensitivity issues.\n\n"
-    prompt += "- Do not check for data type errors because they have all been converted to string type.\n\n"
-    prompt += "-----------------------------------------------\n\n"
-    prompt += "Here are the given inputs:\n"
-    prompt += f"Values of column '{col_name}' along with related attribute values:\n"
-    prompt += f"'{col_values}'\n"
-    prompt += f"Provide your analysis on `{col_name}` values in the required JSON format, **do not care problems in other attributes**:\n"
-    # ---------------------------------------------------------
-    # 新增部分：加入 expert_labeled_right_dict / wrong_dict 示例
-    # ---------------------------------------------------------
+    prompt += "- You MUST strictly follow all the rules below.\n\n"
+    prompt += "- Only mark a value as an error if you are confident it is incorrect.\n"
+    prompt += "- Do NOT mark a value as an error solely because it is not present in examples.\n"
+    prompt += "- Ignore the case sensitivity issues.\n"
+    prompt += "- Do not check for data type errors.\n\n"
+    if col_name in expert_labeled_right_dict or col_name in expert_labeled_wrong_dict:
+        prompt += f"Below are reference examples for analyzing the correctness of `{col_name}` values.\n"
+        prompt += "**These examples illustrate patterns only. They are NOT an exhaustive list.**\n"
+        prompt += "**Do NOT mark a value as wrong simply because it does not appear in the examples.**\n\n"
 
-    # 1. 加入正确示例
     if col_name in expert_labeled_right_dict:
-        prompt += "-----------------------------------------------\n"
-        prompt += f"Here are some valid reference examples for `{col_name}` from previous expert labels:\n"
+        prompt += "### Valid example patterns:\n"
         prompt += json.dumps(expert_labeled_right_dict[col_name], indent=2, ensure_ascii=False)
         prompt += "\n\n"
 
-    # 2. 加入错误示例
     if col_name in expert_labeled_wrong_dict:
-        prompt += "-----------------------------------------------\n"
-        prompt += f"Here are some previously identified *wrong cases* involving `{col_name}` for your reference:\n"
+        prompt += "### Wrong example patterns:\n"
         prompt += json.dumps(expert_labeled_wrong_dict[col_name], indent=2, ensure_ascii=False)
         prompt += "\n\n"
+
+
     return prompt
 
 
