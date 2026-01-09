@@ -1,49 +1,25 @@
 model:
-  model_type: qwen2.5-72b-instruct # qwen3-max  gpt-4o-mini
-  iterations: 5
+  model_type: 'gpt-4o-mini'
+  cluster_rate: 0.1
   api_use: true
-  pre_func_use: true
   related_attrs: true
+  pre_func_use: true
   func_use: true
-  enhanced_use: true
-  n_method: '5%'
-  label_prop: false
-  distri_analysis: false
-  err_gen_use: false
-  guide_use: false
   rel_top: 2
-  run_info: '0Following results running with rereading (after running, if result not idea, suggest rereading, as file reading problem)'
-  func_val_threshold: 0.5
-
-read:
-  pre_func: false
-  related_attrs: false
-  cluster: false
-  error_checking: false
-  extra_all_label: false
-  func: false
-  enhanced: false
-  distri_analysis: false
-  guide: false
-  err_gen: false
-  read_in_batch: false
-  start_time: '02-14-19:32'  
-  end_time: '02-14-22:23'  
+  label_prop: false  # 是否开启标签扩散
+  iterations: 20
+  initial_llm_label_iterations: 5
+  initial_llm_label_consistency_threshold: 1.0
+  train_high_confidence_threshold: 0.7
+  mid_confidence_threshold: 0.5
+  high_confidence_threshold: 0.7
+  cluster_selection_window: 0  # 聚类选择窗口大小：-1表示不能选择任何选择过的聚类，0表示可以选择任意聚类，1表示不能选择上一次的聚类，2表示不能选择前两次的聚类
+  compute_f1_per_iteration: true  # 是否在每次迭代中计算F1分数
 
 data:
   base_dir: '.'
-  err_rate_list: ["01"] #["mixed_err", "typos", "missing_values", "pattern_violations", "rule_violations", "outliers"]
+  err_rate_list: ["01"]
   all_set_num: 1
-  datasets: [ 'flights', ] # 'hospital' 'rayyan', 'billionaire', 'beers'
+  datasets: ['test']  # ''  test
+  result_dir: 'results'
   err_check_val_num_per_query: 20
-  result_dir: 'pipeline'
-  
-
-read_paths:
-  flights01-1: './result/pipeline/11-18 12:10 flights01-5%-set1-iterations2-30/'
-  # flights01-1: './result/pipeline/02-08 flights01-5%-set1/'
-  # flights01-2: './result/pipeline/02-08 flights01-5%-set2/'
-  # flights01-3: './result/pipeline/02-08 flights01-5%-set3/'
-  # flights01-4: './result/pipeline/02-08 flights01-5%-set4/'
-  # flights01-5: './result/pipeline/02-08 flights01-5%-set5/'
-  hospital01-1: './result/pipeline/12-05 14:15 hospital01-5%-set1-iterations5'
