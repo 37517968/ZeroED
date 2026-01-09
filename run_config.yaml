@@ -7,14 +7,15 @@ model:
   func_use: true
   rel_top: 2
   label_prop: false  # 是否开启标签扩散
-  iterations: 20
+  iterations: 10
   initial_llm_label_iterations: 5
   initial_llm_label_consistency_threshold: 1.0
   train_high_confidence_threshold: 0.7
-  mid_confidence_threshold: 0.5
-  high_confidence_threshold: 0.7
-  cluster_selection_window: 0  # 聚类选择窗口大小：-1表示不能选择任何选择过的聚类，0表示可以选择任意聚类，1表示不能选择上一次的聚类，2表示不能选择前两次的聚类
+  mid_confidence_threshold: 0.8
+  high_confidence_threshold: 0.95
+  cluster_selection_window: 5  # 聚类选择窗口大小：-1表示不能选择任何选择过的聚类，0表示可以选择任意聚类，1表示不能选择上一次的聚类，2表示不能选择前两次的聚类
   compute_f1_per_iteration: true  # 是否在每次迭代中计算F1分数
+  result_analyze: true  # 是否保存每轮的训练数据和分类器错误分类结果用于分析
 
 data:
   base_dir: '.'

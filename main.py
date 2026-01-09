@@ -101,21 +101,22 @@ def calculate_confidence_score(p, y_mlp_equals_y_llm, llm_consistency, alpha=0.7
     return confidence
 
 
-# TODO 把它归一化 改成这样Conf(x) = α * 2 * |p - 0.5| + (1 - α) * Stab(x)可以吗
 def calculate_training_confidence(p, stability, alpha=0.7):
     """
     计算训练数据置信度
-    Conf(x) = α * |p - 0.5| + (1 - α) * Stab(x)
+    Conf(x) = α * 2 * |p - 0.5| + (1 - α) * Stab(x)
     
     Args:
-        p: 模型预测概率
-        stability: 预测稳定性
-        alpha: α参数
+        p: 模型预测概率 (范围 [0, 1])
+        stability: 预测稳定性 (范围 [0, 1])
+        alpha: α参数，控制预测置信度和稳定性的权重
     
     Returns:
-        confidence: 置信度分数
+        confidence: 置信度分数 (范围 [0, 1])
     """
-    confidence = alpha * abs(p - 0.5) + (1 - alpha) * stability
+    # 2 * |p - 0.5| 将 [0, 0.5] 归一化到 [0, 1]
+    normalized_pred_confidence = 2 * abs(p - 0.5)
+    confidence = alpha * normalized_pred_confidence + (1 - alpha) * stability
     return confidence
 
 
@@ -1265,6 +1266,7 @@ if __name__ == "__main__":
     HIGH_CONFIDENCE_THRESHOLD = config['model']['high_confidence_threshold']
     CLUSTER_SELECTION_WINDOW = config['model'].get('cluster_selection_window', -1)
     COMPUTE_F1_PER_ITERATION = config['model'].get('compute_f1_per_iteration', False)
+    RESULT_ANALYZE = config['model'].get('result_analyze', False)
 
     # Dataset settings
     base_dir = config['data']['base_dir']
@@ -1391,6 +1393,8 @@ if __name__ == "__main__":
                     labeled_number += sum(len(indices) for indices in indices_dict.values())
             total_time += t.duration
             
+            # TODO 如果开启了result_analyze，则将训练集的变化都保存为文件，先按初始和迭代分，再按列分，再按right和wrong分。其中将初始训练集的构建（再带上其对应的LLM标注一致性分数和确实的计算公式如4/5），每轮迭代时新加入训练集的值（带上confidence及其以数字代入的具体的计算公式），每轮迭代时新移除的训练集的值（带上train_confidence及其以数字代入的具体的计算公式），每轮迭代时新加入高置信度类的值（带上train_confidence及其以数字代入的具体的计算公式）
+
             # ==================== 步骤6: 根据一致性构建初始训练集 ====================
             logger.info("根据LLM标注一致性构建初始训练集")
             with Timer('Building Initial Training Set', logger, time_file) as t:
@@ -1433,9 +1437,20 @@ if __name__ == "__main__":
                         model_col[attr] = model
                 
                 logger.info(f"成功训练 {len(model_col)} 个模型")
-                # 注：某些属性可能因训练数据不足导致模型为None，因此模型数量可能少于属性数量
-            total_time += t.duration    
-            # TODO 将训练集和其对应标签放在model_prediction_history中作为他们的第一次预测结果，因为用它们训练的模型预测的结果肯定也相同
+            total_time += t.duration
+            
+            # 将训练集样本的标签作为第一次预测结果放入model_prediction_history
+            # 因为用这些样本训练的模型对它们的预测结果应该与标签一致
+            for attr in all_attrs:
+                # 正确样本（标签为0）的预测概率设为0.0
+                for idx, value in train_data_dict[attr]['right']:
+                    model_prediction_history[attr][idx].append(0.0)
+                # 错误样本（标签为1）的预测概率设为1.0
+                for idx, value in train_data_dict[attr]['wrong']:
+                    model_prediction_history[attr][idx].append(1.0)
+            
+            logger.info(f"已将训练集样本的标签作为初始预测结果加入预测历史")
+            
             # ==================== 步骤8: 迭代优化 ====================
             logger.info(f"开始迭代优化，共 {ITERATIONS} 轮")
             
@@ -1755,11 +1770,74 @@ if __name__ == "__main__":
                         
                         para_file.write(f"Iteration {iteration + 1} F1: {f1:.4f} (P: {precision:.4f}, R: {recall:.4f})\n")
                     total_time += t.duration
-                # TODO 配置文件中加一个选项result_analyze，并在下方添加根据对应配置是否将每轮构造的训练数据和预测结果（只保留分类器错误分类的内容结果及其对应的属性值）保存到结果文件中的代码
+                # 根据配置保存每轮的分析结果
+                if RESULT_ANALYZE:
+                    # 创建分析结果目录
+                    analyze_dir = os.path.join(resp_path, 'iteration_analysis')
+                    os.makedirs(analyze_dir, exist_ok=True)
+                    
+                    iteration_result = {
+                        'iteration': iteration + 1,
+                        'train_data': {},
+                        'misclassified_samples': []
+                    }
+                    
+                    # 保存当前轮次的训练数据
+                    for attr in all_attrs:
+                        iteration_result['train_data'][attr] = {
+                            'right': [(int(idx), val) for idx, val in train_data_dict[attr]['right']],
+                            'wrong': [(int(idx), val) for idx, val in train_data_dict[attr]['wrong']]
+                        }
+                    
+                    # 找出分类器错误分类的样本（误报和漏报）
+                    for attr in all_attrs:
+                        if attr not in model_col:
+                            continue
+                        
+                        related_attrs = list(related_attrs_dict[attr])
+                        
+                        # 检查预测结果中的误报（预测为错误但实际正确）
+                        for idx, pred_attr in det_wrong_list_res:
+                            if pred_attr == attr:
+                                dirty_val = str(dirty_csv.loc[idx, attr])
+                                clean_val = str(clean_csv.loc[idx, attr])
+                                if dirty_val == clean_val:  # 误报
+                                    iteration_result['misclassified_samples'].append({
+                                        'type': 'false_positive',
+                                        'attr': attr,
+                                        'idx': int(idx),
+                                        'value': dirty_csv.loc[idx, [attr] + related_attrs].to_dict(),
+                                        'dirty_val': dirty_val,
+                                        'clean_val': clean_val
+                                    })
+                        
+                        # 检查漏报（实际错误但预测为正确）
+                        detected_indices = {idx for idx, pred_attr in det_wrong_list_res if pred_attr == attr}
+                        for idx in range(len(dirty_csv)):
+                            dirty_val = str(dirty_csv.loc[idx, attr])
+                            clean_val = str(clean_csv.loc[idx, attr])
+                            if dirty_val != clean_val and idx not in detected_indices:  # 漏报
+                                iteration_result['misclassified_samples'].append({
+                                    'type': 'false_negative',
+                                    'attr': attr,
+                                    'idx': int(idx),
+                                    'value': dirty_csv.loc[idx, [attr] + related_attrs].to_dict(),
+                                    'dirty_val': dirty_val,
+                                    'clean_val': clean_val
+                                })
+                    
+                    # 保存到文件
+                    iteration_file = os.path.join(analyze_dir, f'iteration_{iteration + 1}_analysis.json')
+                    with open(iteration_file, 'w', encoding='utf-8') as f:
+                        json.dump(iteration_result, f, ensure_ascii=False, indent=2)
+                    
+                    logger.info(f"迭代 {iteration + 1} 分析结果已保存到: {iteration_file}")
+                    logger.info(f"  误分类样本数: {len(iteration_result['misclassified_samples'])}")
 
             # ==================== 步骤9: 根据高置信度样本生成函数 ====================
             logger.info("根据高置信度样本生成函数")
             with Timer('Generating Functions from High Confidence Samples', logger, time_file) as t:
+                # TODO 这部分可能报错expected string or bytes-like object Traceback (most recent call last) 帮我修复它，确保不会报错
                 err_gen_dict, funcs_for_attr = process_gen_err_funcs(
                     FUNC_USE, resp_path, funcs_directory, dirty_csv, all_attrs,
                     para_file, related_attrs_dict, high_confidence_right_dict, high_confidence_wrong_dict, API_USE, MODEL_TYPE
