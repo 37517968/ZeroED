@@ -22,7 +22,6 @@ import yaml
 from sklearn.neural_network import MLPClassifier
 from tqdm import tqdm
 
-from distri_analys import LLMDataDistrAnalyzer
 from feature import cluster, feat_gen_df, feat_gen_df_incremental, feat_gen_global_cache
 from get_rel_attrs import (cal_all_column_nmi, cal_strong_res_column_nmi)
 from measure import measure_detect
@@ -102,6 +101,7 @@ def calculate_confidence_score(p, y_mlp_equals_y_llm, llm_consistency, alpha=0.7
     return confidence
 
 
+# TODO 把它归一化 改成这样Conf(x) = α * 2 * |p - 0.5| + (1 - α) * Stab(x)可以吗
 def calculate_training_confidence(p, stability, alpha=0.7):
     """
     计算训练数据置信度
@@ -1434,8 +1434,8 @@ if __name__ == "__main__":
                 
                 logger.info(f"成功训练 {len(model_col)} 个模型")
                 # 注：某些属性可能因训练数据不足导致模型为None，因此模型数量可能少于属性数量
-            total_time += t.duration
-            
+            total_time += t.duration    
+            # TODO 将训练集和其对应标签放在model_prediction_history中作为他们的第一次预测结果，因为用它们训练的模型预测的结果肯定也相同
             # ==================== 步骤8: 迭代优化 ====================
             logger.info(f"开始迭代优化，共 {ITERATIONS} 轮")
             
@@ -1538,7 +1538,6 @@ if __name__ == "__main__":
                     )
                     
                     new_high_conf_samples = 0
-                    # new_mid_conf_samples = 0
                     
                     for attr in all_attrs:
                         related_attrs = list(related_attrs_dict[attr])
@@ -1592,16 +1591,16 @@ if __name__ == "__main__":
                             count_confidence = min(llm_label_count / 5.0, 1.0)  # 5次标注为满分
                             
                             # 权重参数
-                            w_cls = 0.3
+                            w_cls = 0.1
                             w_llm = 0.4
                             w_agree = 0.2
-                            w_count = 0.1
+                            w_count = 0.3
                             
                             # 综合置信度计算
                             confidence = (w_cls * classifier_confidence + 
                                         w_llm * llm_consistency + 
                                         w_agree * is_agree + 
-                                        w_count * count_confidence)
+                                        w_count * count_confidence) # 0.7
                             
                             value = dirty_csv.loc[idx, [attr] + related_attrs].to_dict()
                             
@@ -1756,7 +1755,8 @@ if __name__ == "__main__":
                         
                         para_file.write(f"Iteration {iteration + 1} F1: {f1:.4f} (P: {precision:.4f}, R: {recall:.4f})\n")
                     total_time += t.duration
-            
+                # TODO 配置文件中加一个选项result_analyze，并在下方添加根据对应配置是否将每轮构造的训练数据和预测结果（只保留分类器错误分类的内容结果及其对应的属性值）保存到结果文件中的代码
+
             # ==================== 步骤9: 根据高置信度样本生成函数 ====================
             logger.info("根据高置信度样本生成函数")
             with Timer('Generating Functions from High Confidence Samples', logger, time_file) as t:
