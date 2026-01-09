@@ -49,7 +49,7 @@ class Logger:
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
 
-        file_handler = logging.FileHandler(os.path.join(resp_path, 'run.log'))
+        file_handler = logging.FileHandler(os.path.join(resp_path, 'run.log'), encoding='utf-8')
         file_handler.setLevel(logging.INFO)
         
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -61,6 +61,22 @@ class Logger:
         
     def get_logger(self):
         return self.logger
+    
+    def info(self, message):
+        """代理方法：记录 INFO 级别日志"""
+        self.logger.info(message)
+    
+    def error(self, message):
+        """代理方法：记录 ERROR 级别日志"""
+        self.logger.error(message)
+    
+    def warning(self, message):
+        """代理方法：记录 WARNING 级别日志"""
+        self.logger.warning(message)
+    
+    def debug(self, message):
+        """代理方法：记录 DEBUG 级别日志"""
+        self.logger.debug(message)
 
 
 def get_read_paths(start_time, end_time, base_dir, result_dir):
