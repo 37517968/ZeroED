@@ -387,25 +387,39 @@ def extract_labels_from_responses(attr_name, responses_with_indices, dirty_csv, 
     index_value_label_dict = defaultdict(list)
     related_attrs = list(related_attrs_dict[attr_name])
     
+    # 需要过滤的关键词列表（如果error_analysis包含这些词且标记为错误，则改为正确）
+    filter_keywords = ['duplicate', 'duplication', 'type']
+    
     for response, indices in responses_with_indices:
-        content = response.replace('\\+', '').replace('\\n', '\n')
+        resp_content = response.replace('\\+', '').replace('\\n', '\n')
         
         wrong_pattern = err_pat_in_text_attr(attr_name)
         right_pattern = right_pat_in_text_attr(attr_name)
         
+        # 新增：提取带有error_analysis的完整模式，用于检查是否需要过滤
+        # 匹配格式: "value_row": "...", "error_analysis": "...", "has_error_in_xxx_value": true/false
+        full_pattern = fr'"value_row":\s*(".*?"),\s*\n\s*"error_analysis":\s*"([^"]*)",\s*\n\s*"has_error_in_{attr_name}_value":\s*(true|false)'
+        
         events = []
         
-        for m in re.finditer(wrong_pattern, content):
+        # 使用完整模式提取，同时检查error_analysis内容
+        for m in re.finditer(full_pattern, resp_content, re.IGNORECASE):
+            value_row = m.group(1)
+            error_analysis = m.group(2).lower()
+            has_error = m.group(3).lower() == 'true'
+            
             text = normalize_string(
-                m.group(1).replace("':'", "': '").replace(',', ', ').replace(',  ', ', ').replace('"', "'")
-            ).replace('"{', '{', 1)[:-1] if m.group(1).startswith('"{') else normalize_string(m.group(1))
-            events.append((m.start(), text, 1))
-        
-        for m in re.finditer(right_pattern, content):
-            text = normalize_string(
-                m.group(1).replace("':'", "': '").replace(',', ', ').replace(',  ', ', ').replace('"', "'")
-            ).replace('"{', '{', 1)[:-1] if m.group(1).startswith('"{') else normalize_string(m.group(1))
-            events.append((m.start(), text, 0))
+                value_row.replace("':'", "': '").replace(',', ', ').replace(',  ', ', ').replace('"', "'")
+            ).replace('"{', '{', 1)[:-1] if value_row.startswith('"{') else normalize_string(value_row)
+            
+            # 检查是否需要过滤：如果error_analysis包含过滤关键词且标记为错误，则改为正确
+            if has_error and any(keyword in error_analysis for keyword in filter_keywords):
+                # 将错误标记改为正确
+                status = 0
+            else:
+                status = 1 if has_error else 0
+            
+            events.append((m.start(), text, status))
         
         events.sort(key=lambda x: x[0])
         
