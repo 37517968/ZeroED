@@ -290,3 +290,195 @@ f"    # Value of `{attr_name}` is row[attr]\n"
 
 def guide_gen_prompt():
     return
+
+def distribution_analysis_decision_prompt(attr_name, cluster_center_values):
+    """
+    生成让LLM判断是否需要调用分布分析方法的prompt
+    
+    Args:
+        attr_name: 属性名称
+        cluster_center_values: 聚类中心的代表性值列表
+    """
+    values_str = '\n'.join([f"- {v}" for v in cluster_center_values])
+    
+    prompt = f"""You are a data quality expert. Below are representative values from the '{attr_name}' column that were obtained through clustering analysis.
+
+Representative values for column '{attr_name}':
+{values_str}
+
+These values represent different patterns found in the data. Your task is to determine whether you can confidently distinguish between correct and incorrect values.
+
+If you observe multiple distinct patterns in these values and you are uncertain which pattern(s) represent the correct/canonical form, you should request distribution analysis to help identify the dominant patterns.
+
+Question: Can you accurately distinguish correct values from incorrect values based on these representative samples? If there are multiple patterns that make you uncertain about which pattern is correct, you may choose to call the distribution analysis method.
+
+Please respond with ONLY 'yes' or 'no':
+- 'yes' means you need distribution analysis (multiple patterns exist and you're uncertain)
+- 'no' means you can confidently identify correct/incorrect values without distribution analysis
+"""
+    return prompt
+
+
+def canonical_pattern_analysis_prompt(attr_name, cluster_samples, cluster_id, canonical_score):
+    """
+    生成让LLM分析标准模式的prompt
+    
+    Args:
+        attr_name: 属性名称
+        cluster_samples: 该簇中的样本值列表（最多10条）
+        cluster_id: 簇的ID
+        canonical_score: 该簇的规范得分
+    """
+    samples_str = '\n'.join([f"- {s}" for s in cluster_samples])
+    
+    prompt = f"""You are a data quality expert specializing in pattern recognition. Analyze the following sample values from a data cluster to identify the canonical (standard) pattern.
+
+Column: '{attr_name}'
+Cluster ID: {cluster_id}
+Canonical Score: {canonical_score:.4f}
+
+Sample values from this cluster:
+{samples_str}
+
+Your task:
+1. Identify the common pattern shared by these values
+2. Describe the canonical/standard format for this pattern
+3. Provide a regex pattern (if applicable) that matches valid values
+4. List key characteristics that define this pattern
+
+Please respond in the following JSON format:
+```json
+{{
+    "pattern_name": "A short descriptive name for this pattern",
+    "pattern_description": "Detailed description of the canonical pattern",
+    "regex_pattern": "Regular expression pattern (or 'N/A' if not applicable)",
+    "key_characteristics": ["characteristic1", "characteristic2", ...],
+    "example_valid_values": ["example1", "example2", ...],
+    "common_errors": ["potential error type 1", "potential error type 2", ...]
+}}
+```
+"""
+    return prompt
+
+
+def error_check_with_canonical_prompt(col_values, col_name, expert_labeled_right_dict, expert_labeled_wrong_dict, canonical_patterns):
+    """
+    带有标准模式上下文的错误检查prompt
+    
+    Args:
+        col_values: 待检查的列值
+        col_name: 列名
+        expert_labeled_right_dict: 专家标注的正确样本字典
+        expert_labeled_wrong_dict: 专家标注的错误样本字典
+        canonical_patterns: 标准模式列表
+    """
+    lines = col_values.strip().split('\n')
+    try:
+        col_list = re.findall(r'"([^"]+)"\s*:', lines[0])
+    except json.JSONDecodeError as e:
+       print(f"JSON Decode Error: {e}")
+       print(f"Problematic JSON string: {lines[0]}")
+
+    template_dict_1 = {key: f'{key}_example_val_1' for key in col_list}
+    template_dict_2 = {key: f'{key}_example_val_2' for key in col_list}
+    
+    prompt = ""
+    prompt += f"As a data quality expert, please analyze the '{col_name}' attribute values for potential errors. \n"
+    prompt += "-----------------------------------------------\n\n"
+    
+    # 添加标准模式上下文
+    if canonical_patterns and len(canonical_patterns) > 0:
+        prompt += f"### Canonical Patterns for '{col_name}':\n"
+        prompt += "The following are the identified standard/canonical patterns for this column. Values that deviate significantly from these patterns may be errors.\n\n"
+        for i, pattern in enumerate(canonical_patterns, 1):
+            prompt += f"**Pattern {i}: {pattern.get('pattern_name', 'Unknown')}**\n"
+            prompt += f"- Description: {pattern.get('pattern_description', 'N/A')}\n"
+            if pattern.get('regex_pattern') and pattern.get('regex_pattern') != 'N/A':
+                prompt += f"- Regex: `{pattern.get('regex_pattern')}`\n"
+            if pattern.get('key_characteristics'):
+                prompt += f"- Key characteristics: {', '.join(pattern.get('key_characteristics', []))}\n"
+            prompt += "\n"
+        prompt += "-----------------------------------------------\n\n"
+    
+    prompt += "Here are the given inputs:\n"
+    prompt += f"Values of column '{col_name}' along with related attribute values:\n"
+    prompt += f"'{col_values}'\n"
+    prompt += f"Provide your analysis on `{col_name}` values in JSON format as follows, **do not care problems in other attributes**:\n\n"
+    prompt += '''
+```json
+{'''
+    prompt += f'''"column_name": "{col_name}",'''
+    prompt += '''
+  "entries": [
+    {'''
+    prompt += f'''\n"value_row": "{template_dict_1}",'''
+    prompt += f'''\n"error_analysis": "[Brief explanation of the error analysis, if applicable]",'''
+    prompt += f'''\n"has_error_in_{col_name}_value": true/false,'''
+    prompt += '''
+    },
+    {'''
+    prompt += f'''\n"value_row": "{template_dict_2}",'''
+    prompt += f'''\n"error_analysis": "[Brief explanation of the error analysis, if applicable]",'''
+    prompt += f'''\n"has_error_in_{col_name}_value": true/false,'''
+    prompt += '''
+    }
+  ]
+}
+```
+\n\n'''
+    prompt += "- You MUST strictly follow all the rules below.\n\n"
+    prompt += "- Only mark a value as an error if you are confident it is incorrect.\n"
+    prompt += "- Use the canonical patterns above as reference for identifying errors.\n"
+    prompt += "- Do NOT mark a value as an error solely because it is not present in examples.\n"
+    prompt += "- Ignore the case sensitivity issues.\n"
+    prompt += "- Do not check for data type errors.\n\n"
+    
+    if col_name in expert_labeled_right_dict or col_name in expert_labeled_wrong_dict:
+        prompt += f"Below are reference examples for analyzing the correctness of `{col_name}` values.\n"
+        prompt += "**These examples illustrate patterns only. They are NOT an exhaustive list.**\n"
+        prompt += "**Do NOT mark a value as wrong simply because it does not appear in the examples.**\n\n"
+
+    if col_name in expert_labeled_right_dict:
+        prompt += "### Valid example patterns:\n"
+        prompt += json.dumps(expert_labeled_right_dict[col_name], indent=2, ensure_ascii=False)
+        prompt += "\n\n"
+
+    if col_name in expert_labeled_wrong_dict:
+        prompt += "### Wrong example patterns:\n"
+        prompt += json.dumps(expert_labeled_wrong_dict[col_name], indent=2, ensure_ascii=False)
+        prompt += "\n\n"
+
+    return prompt
+
+
+def llm_canonicality_score_prompt(attr_name, sample_values):
+    """
+    生成让LLM判断聚类样本值规范性的prompt
+    
+    Args:
+        attr_name: 属性名称
+        sample_values: 样本值列表（最多5个）
+    """
+    values_str = '\n'.join([f"- \"{v}\"" for v in sample_values])
+    
+    prompt = f"""You are a data quality expert. Please evaluate the canonicality (validity/correctness) of the following sample values from the '{attr_name}' column.
+
+Sample values:
+{values_str}
+
+Please evaluate these values based on the following criteria:
+1. Are these values meaningful and valid data? (not empty, null, placeholder, or obviously erroneous)
+2. Do these values follow a reasonable format for this type of data?
+3. Are these values likely to be correct/canonical representations?
+
+Score guidelines:
+- 0.0-0.2: Obviously invalid (empty strings, null, 'nan', 'N/A', placeholder values, garbage data)
+- 0.2-0.4: Likely invalid (suspicious patterns, incomplete data, obvious errors)
+- 0.4-0.6: Uncertain (could be valid or invalid, ambiguous)
+- 0.6-0.8: Likely valid (reasonable format, plausible values)
+- 0.8-1.0: Highly valid (clear, well-formatted, canonical values)
+
+Please respond with ONLY a single decimal number between 0.0 and 1.0 representing the canonicality score.
+Do not include any explanation, just the number.
+"""
+    return prompt

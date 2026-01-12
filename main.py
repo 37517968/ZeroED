@@ -28,7 +28,9 @@ from measure import measure_detect
 from prompt_gen import (create_err_gen_inst_prompt, err_clean_func_prompt,
                         error_check_prompt, pre_func_prompt,
                         create_clean_gen_inst_prompt, create_dirty_gen_inst_prompt,
-                        guide_gen_prompt, 
+                        guide_gen_prompt, distribution_analysis_decision_prompt,
+                        canonical_pattern_analysis_prompt, error_check_with_canonical_prompt,
+                        llm_canonicality_score_prompt
                         )
 from utility import (Logger, Timer, copy_file,
                      default_dict_of_lists, get_ans_from_llm, query_base,
@@ -52,6 +54,687 @@ class NumpyEncoder(json.JSONEncoder):
 def sigmoid(x):
     """Sigmoid函数"""
     return 1 / (1 + np.exp(-np.clip(x, -500, 500)))
+
+
+# ==================== 分布分析方法相关函数 ====================
+
+def get_single_column_features(dirty_csv, col_num, col_name):
+    """
+    获取单列特征（不考虑其他相关列）
+    重点关注"形式/模式"相似性而非内容相似性
+    这样像 movies_actor 这种列，形式相似的演员列表会聚在一起
+    
+    Args:
+        dirty_csv: 脏数据DataFrame
+        col_num: 列索引
+        col_name: 列名
+    
+    Returns:
+        features: 特征数组
+    """
+    from feature import str_agg, L2_str_agg, L3_str_agg
+    from sklearn.preprocessing import MinMaxScaler
+    from collections import Counter
+    
+    dirty_csv = dirty_csv.astype(str).fillna('nan')
+    
+    feature_list = []
+    
+    for row in range(len(dirty_csv)):
+        feature = []
+        val = str(dirty_csv.iloc[row, col_num])
+        
+        # ========== 形式/模式特征（主要特征）==========
+        
+        # 1. 基本结构特征
+        feature.append(len(val))  # 字符串长度
+        feature.append(len(val.split()))  # 单词数量
+        feature.append(val.count(','))  # 逗号数量（列表分隔符）
+        feature.append(val.count(';'))  # 分号数量
+        feature.append(val.count('|'))  # 竖线数量
+        feature.append(val.count('/'))  # 斜杠数量
+        feature.append(val.count('-'))  # 连字符数量
+        feature.append(val.count('(') + val.count(')'))  # 括号数量
+        feature.append(val.count('[') + val.count(']'))  # 方括号数量
+        
+        # 2. 字符类型比例特征
+        total_len = max(len(val), 1)
+        digit_count = sum(c.isdigit() for c in val)
+        alpha_count = sum(c.isalpha() for c in val)
+        upper_count = sum(c.isupper() for c in val)
+        lower_count = sum(c.islower() for c in val)
+        space_count = sum(c.isspace() for c in val)
+        special_count = sum(not c.isalnum() and not c.isspace() for c in val)
+        
+        feature.append(digit_count / total_len)  # 数字比例
+        feature.append(alpha_count / total_len)  # 字母比例
+        feature.append(upper_count / total_len)  # 大写字母比例
+        feature.append(lower_count / total_len)  # 小写字母比例
+        feature.append(space_count / total_len)  # 空格比例
+        feature.append(special_count / total_len)  # 特殊字符比例
+        
+        # 3. Pattern特征（形式抽象）
+        pat_list = str_agg(val)
+        # L2 pattern: 字符类型序列 (D=数字, L=字母, S=符号)
+        l2_pat = L2_str_agg(val)
+        # L3 pattern: 更细粒度的字符类型序列
+        l3_pat = L3_str_agg(val)
+        
+        # Pattern长度特征
+        for pat in pat_list:
+            feature.append(len(pat))
+        
+        # Pattern中各类型段的数量
+        feature.append(l2_pat.count('\\D'))  # 数字段数量
+        feature.append(l2_pat.count('\\L'))  # 字母段数量
+        feature.append(l2_pat.count('\\S'))  # 符号段数量
+        
+        # 4. 结构复杂度特征
+        # 字符类型转换次数（衡量结构复杂度）
+        transitions = 0
+        prev_type = None
+        for c in val:
+            if c.isdigit():
+                curr_type = 'D'
+            elif c.isalpha():
+                curr_type = 'L'
+            else:
+                curr_type = 'S'
+            if prev_type is not None and curr_type != prev_type:
+                transitions += 1
+            prev_type = curr_type
+        feature.append(transitions)
+        feature.append(transitions / total_len if total_len > 0 else 0)  # 转换密度
+        
+        # 5. 特殊值标识特征
+        val_lower = val.lower().strip()
+        feature.append(1.0 if val_lower in ['', 'nan', 'null', 'none', 'n/a', 'na', '-', '--', 'unknown', 'missing'] else 0.0)
+        feature.append(1.0 if len(val.strip()) == 0 else 0.0)  # 是否为空或只有空格
+        
+        # 6. 首尾字符类型特征
+        if len(val) > 0:
+            first_char = val[0]
+            last_char = val[-1]
+            feature.append(1.0 if first_char.isupper() else 0.0)
+            feature.append(1.0 if first_char.isdigit() else 0.0)
+            feature.append(1.0 if last_char.isdigit() else 0.0)
+            feature.append(1.0 if last_char in '.!?;:' else 0.0)
+        else:
+            feature.extend([0.0, 0.0, 0.0, 0.0])
+        
+        feature_list.append(feature)
+    
+    # 归一化
+    scaler = MinMaxScaler()
+    feature_array = np.array(feature_list)
+    feature_array = np.nan_to_num(feature_array)
+    if len(feature_array) > 0:
+        feature_array = scaler.fit_transform(feature_array)
+    
+    return feature_array
+
+
+def single_column_dbscan_clustering(dirty_csv, col_num, col_name, eps=0.3, min_samples=2):
+    """
+    对单列进行DBSCAN聚类（不考虑其他相关列）
+    
+    Args:
+        dirty_csv: 脏数据DataFrame
+        col_num: 列索引
+        col_name: 列名
+        eps: DBSCAN的距离阈值ε
+        min_samples: DBSCAN的最小样本数
+    
+    Returns:
+        cluster_result: 聚类结果字典
+    """
+    from sklearn.cluster import DBSCAN
+    
+    # 获取单列特征
+    features = get_single_column_features(dirty_csv, col_num, col_name)
+    
+    if len(features) == 0:
+        return None
+    
+    # DBSCAN聚类
+    dbscan = DBSCAN(eps=eps, min_samples=min_samples, metric='euclidean')
+    labels = dbscan.fit_predict(features)
+    
+    # 获取聚类数量（不包括噪声点-1）
+    n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+    
+    # 为每个聚类找到中心点
+    cluster_centers = []
+    cluster_indices = []
+    cluster_values = []
+    
+    for cluster_id in range(n_clusters):
+        cluster_mask = labels == cluster_id
+        cluster_point_indices = np.where(cluster_mask)[0]
+        cluster_points = features[cluster_mask]
+        
+        if len(cluster_points) == 0:
+            continue
+        
+        cluster_mean = np.mean(cluster_points, axis=0)
+        distances = np.linalg.norm(cluster_points - cluster_mean, axis=1)
+        closest_idx_in_cluster = np.argmin(distances)
+        center_idx = cluster_point_indices[closest_idx_in_cluster]
+        
+        cluster_centers.append(center_idx)
+        cluster_indices.append(cluster_point_indices.tolist())
+        values = [str(dirty_csv.iloc[idx, col_num]) for idx in cluster_point_indices]
+        cluster_values.append(values)
+    
+    noise_indices = np.where(labels == -1)[0].tolist()
+    
+    cluster_result = {
+        'n_clusters': n_clusters,
+        'labels': labels.tolist(),
+        'cluster_centers': cluster_centers,
+        'cluster_indices': cluster_indices,
+        'cluster_values': cluster_values,
+        'noise_indices': noise_indices,
+        'features': features
+    }
+    
+    return cluster_result
+
+
+def calculate_pattern_entropy(values):
+    """计算一组值的pattern熵"""
+    from feature import L2_str_agg
+    import math
+    
+    if len(values) == 0:
+        return 0.0
+    
+    patterns = [L2_str_agg(str(v)) for v in values]
+    pattern_counts = Counter(patterns)
+    total = len(patterns)
+    
+    entropy = 0.0
+    for count in pattern_counts.values():
+        if count > 0:
+            p = count / total
+            entropy -= p * math.log(p + 1e-10)
+    
+    return entropy
+
+
+def calculate_string_similarity(s1, s2):
+    """计算两个字符串的相似度（使用编辑距离）"""
+    s1, s2 = str(s1), str(s2)
+    if len(s1) == 0 and len(s2) == 0:
+        return 1.0
+    
+    m, n = len(s1), len(s2)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    
+    for i in range(m + 1):
+        dp[i][0] = i
+    for j in range(n + 1):
+        dp[0][j] = j
+    
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if s1[i-1] == s2[j-1]:
+                dp[i][j] = dp[i-1][j-1]
+            else:
+                dp[i][j] = min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]) + 1
+    
+    edit_distance = dp[m][n]
+    max_len = max(m, n)
+    
+    if max_len == 0:
+        return 1.0
+    
+    return 1 - edit_distance / max_len
+
+
+def get_llm_canonicality_score(attr_name, sample_values, logger=None):
+    """
+    使用LLM评估聚类样本值的规范性
+    
+    Args:
+        attr_name: 属性名称
+        sample_values: 样本值列表
+        logger: 日志记录器
+    
+    Returns:
+        score: 规范性分数 (0-1)
+    """
+    # 最多取5个样本
+    samples = sample_values[:5] if len(sample_values) > 5 else sample_values
+    
+    # 先进行快速的规则检查，对于明显的无效值直接返回低分
+    invalid_patterns = ['', 'nan', 'null', 'none', 'n/a', 'na', '-', '--', 'unknown', 'missing', ' ']
+    
+    # 检查是否所有样本都是无效值
+    invalid_count = 0
+    for val in samples:
+        val_lower = str(val).lower().strip()
+        if val_lower in invalid_patterns or len(val_lower) == 0:
+            invalid_count += 1
+    
+    # 如果大部分是无效值，直接返回低分
+    if invalid_count >= len(samples) * 0.8:
+        if logger:
+            logger.info(f"列 '{attr_name}' 聚类样本大部分为无效值，LLM规范性分数: 0.1")
+        return 0.1
+    
+    # 调用LLM评估
+    prompt = llm_canonicality_score_prompt(attr_name, samples)
+    
+    try:
+        response = query_base(prompt)
+        response = response.strip()
+        
+        # 尝试解析分数
+        try:
+            score = float(response)
+            score = max(0.0, min(1.0, score))  # 确保在0-1范围内
+        except ValueError:
+            # 如果无法解析，尝试从响应中提取数字
+            import re
+            numbers = re.findall(r'\d+\.?\d*', response)
+            if numbers:
+                score = float(numbers[0])
+                score = max(0.0, min(1.0, score))
+            else:
+                score = 0.5  # 默认中等分数
+        
+        if logger:
+            logger.info(f"列 '{attr_name}' 聚类LLM规范性分数: {score:.2f}")
+        
+        return score
+    except Exception as e:
+        if logger:
+            logger.warning(f"获取LLM规范性分数时出错: {str(e)}，使用默认分数0.5")
+        return 0.5
+
+
+def calculate_canonical_score(cluster_values, total_samples, alpha=0.25, beta=0.15, gamma=0.15, delta=0.45, 
+                              attr_name=None, logger=None, use_llm_score=True):
+    """
+    计算聚类的规范得分（Canonical Score）
+    
+    S_canon(C_j) = α * Freq(C_j) + β * Reg(C_j) + γ * Compact(C_j) + δ * LLM_Canon(C_j)
+    
+    参数说明：
+    - α (alpha): 频率项权重，默认0.25
+    - β (beta): 规则性项权重，默认0.15
+    - γ (gamma): 紧致性项权重，默认0.15
+    - δ (delta): LLM规范性项权重，默认0.45（较大权重，确保空值等明显错误不会获得高分）
+    
+    Args:
+        cluster_values: 聚类中的所有值列表
+        total_samples: 总样本数N
+        alpha, beta, gamma, delta: 各项权重
+        attr_name: 属性名称（用于LLM评估）
+        logger: 日志记录器
+        use_llm_score: 是否使用LLM规范性评分
+    
+    Returns:
+        score: 规范得分
+        components: 各分量的值
+    """
+    import math
+    
+    cluster_size = len(cluster_values)
+    
+    if cluster_size == 0:
+        return 0.0, {'freq': 0, 'reg': 0, 'compact': 0, 'llm_canon': 0}
+    
+    # (1) 频率项 Freq(C_j) = |C_j| / N
+    freq = cluster_size / total_samples
+    
+    # (2) 规则性项 Reg(C_j) = 1 - pattern_entropy(C_j) / log(K)
+    pattern_entropy = calculate_pattern_entropy(cluster_values)
+    K = max(cluster_size, 2)
+    log_K = math.log(K + 1e-10)
+    reg = 1 - pattern_entropy / log_K if log_K > 0 else 1.0
+    reg = max(0, min(1, reg))
+    
+    # (3) 紧致性项 Compact(C_j)
+    if cluster_size <= 1:
+        compact = 1.0
+    else:
+        # 为了效率，只采样部分值计算相似度
+        sample_size = min(cluster_size, 20)
+        if cluster_size > sample_size:
+            import random
+            sampled_values = random.sample(cluster_values, sample_size)
+        else:
+            sampled_values = cluster_values
+        
+        total_sim = 0.0
+        for i in range(len(sampled_values)):
+            for j in range(len(sampled_values)):
+                total_sim += calculate_string_similarity(sampled_values[i], sampled_values[j])
+        compact = total_sim / (len(sampled_values) * len(sampled_values))
+    
+    # (4) LLM规范性项 LLM_Canon(C_j)
+    llm_canon = 0.5  # 默认中等分数
+    if use_llm_score and attr_name:
+        # 取样本值进行LLM评估
+        sample_for_llm = cluster_values[:5] if len(cluster_values) > 5 else cluster_values
+        llm_canon = get_llm_canonicality_score(attr_name, sample_for_llm, logger)
+    
+    # 计算总分
+    # 如果不使用LLM分数，重新分配权重
+    if use_llm_score:
+        score = alpha * freq + beta * reg + gamma * compact + delta * llm_canon
+    else:
+        # 不使用LLM时，将delta的权重分配给其他项
+        adjusted_alpha = alpha + delta / 3
+        adjusted_beta = beta + delta / 3
+        adjusted_gamma = gamma + delta / 3
+        score = adjusted_alpha * freq + adjusted_beta * reg + adjusted_gamma * compact
+        llm_canon = 0.0
+    
+    components = {
+        'freq': freq,
+        'reg': reg,
+        'compact': compact,
+        'llm_canon': llm_canon,
+        'pattern_entropy': pattern_entropy
+    }
+    
+    return score, components
+
+
+def calculate_canonical_probability(scores):
+    """计算每个聚类成为Canonical簇的概率（softmax）"""
+    if len(scores) == 0:
+        return []
+    
+    exp_scores = np.exp(np.array(scores) - np.max(scores))
+    probabilities = exp_scores / np.sum(exp_scores)
+    
+    return probabilities.tolist()
+
+
+def perform_distribution_analysis(dirty_csv, col_num, col_name, config, logger):
+    """执行分布分析方法"""
+    eps = config.get('eps', 0.3)
+    max_cluster_centers = config.get('max_cluster_centers', 20)
+    top_canonical_clusters = config.get('top_canonical_clusters', 2)
+    alpha = config.get('alpha', 0.4)
+    beta = config.get('beta', 0.3)
+    gamma = config.get('gamma', 0.3)
+    
+    logger.info(f"对列 '{col_name}' 执行分布分析，eps={eps}")
+    
+    cluster_result = single_column_dbscan_clustering(dirty_csv, col_num, col_name, eps=eps)
+    
+    if cluster_result is None or cluster_result['n_clusters'] == 0:
+        logger.warning(f"列 '{col_name}' 聚类结果为空")
+        return None
+    
+    logger.info(f"列 '{col_name}' 聚类完成，共 {cluster_result['n_clusters']} 个聚类")
+    
+    total_samples = len(dirty_csv)
+    canonical_scores = []
+    score_components = []
+    
+    # 从配置中获取delta参数（LLM规范性权重）
+    delta = config.get('delta', 0.45)
+    
+    for cluster_values in cluster_result['cluster_values']:
+        score, components = calculate_canonical_score(
+            cluster_values, total_samples, alpha, beta, gamma, delta,
+            attr_name=col_name, logger=logger, use_llm_score=True
+        )
+        canonical_scores.append(score)
+        score_components.append(components)
+    
+    canonical_probs = calculate_canonical_probability(canonical_scores)
+    
+    sorted_indices = np.argsort(canonical_scores)[::-1]
+    top_canonical_indices = sorted_indices[:top_canonical_clusters].tolist()
+    
+    logger.info(f"列 '{col_name}' Top-{top_canonical_clusters} Canonical簇: {top_canonical_indices}")
+    for i, idx in enumerate(top_canonical_indices):
+        logger.info(f"  Canonical {i+1}: 聚类{idx}, Score={canonical_scores[idx]:.4f}, Prob={canonical_probs[idx]:.4f}")
+    
+    center_values = []
+    for center_idx in cluster_result['cluster_centers'][:max_cluster_centers]:
+        center_values.append(str(dirty_csv.iloc[center_idx, col_num]))
+    
+    analysis_result = {
+        'col_name': col_name,
+        'col_num': col_num,
+        'n_clusters': cluster_result['n_clusters'],
+        'cluster_centers': cluster_result['cluster_centers'],
+        'cluster_indices': cluster_result['cluster_indices'],
+        'cluster_values': cluster_result['cluster_values'],
+        'center_values': center_values,
+        'canonical_scores': canonical_scores,
+        'score_components': score_components,
+        'canonical_probs': canonical_probs,
+        'top_canonical_indices': top_canonical_indices,
+        'noise_indices': cluster_result['noise_indices'],
+        'config': config
+    }
+    
+    return analysis_result
+
+
+def ask_llm_for_distribution_analysis(attr_name, center_values, logger):
+    """询问LLM是否需要分布分析"""
+    prompt = distribution_analysis_decision_prompt(attr_name, center_values)
+    
+    try:
+        response = query_base(prompt)
+        response = response.strip().lower()
+        
+        logger.info(f"列 '{attr_name}' LLM分布分析决策响应: {response}")
+        
+        if 'yes' in response:
+            return True
+        elif 'no' in response:
+            return False
+        else:
+            logger.warning(f"列 '{attr_name}' LLM响应无法解析，默认不使用分布分析")
+            return False
+    except Exception as e:
+        logger.error(f"询问LLM分布分析决策时出错: {str(e)}")
+        return False
+
+
+def analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger):
+    """使用LLM分析Canonical簇的标准模式"""
+    col_name = analysis_result['col_name']
+    top_canonical_indices = analysis_result['top_canonical_indices']
+    cluster_values = analysis_result['cluster_values']
+    canonical_scores = analysis_result['canonical_scores']
+    max_samples = analysis_result['config'].get('max_samples_per_cluster', 10)
+    
+    canonical_patterns = []
+    
+    for idx in top_canonical_indices:
+        if idx >= len(cluster_values):
+            continue
+        
+        samples = cluster_values[idx][:max_samples]
+        score = canonical_scores[idx]
+        
+        prompt = canonical_pattern_analysis_prompt(col_name, samples, idx, score)
+        
+        try:
+            response = query_base(prompt)
+            
+            json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+            if json_match:
+                pattern_json = json_match.group(1)
+                pattern = json.loads(pattern_json)
+                pattern['cluster_id'] = idx
+                pattern['canonical_score'] = score
+                canonical_patterns.append(pattern)
+                logger.info(f"列 '{col_name}' 聚类{idx} 标准模式: {pattern.get('pattern_name', 'Unknown')}")
+            else:
+                try:
+                    pattern = json.loads(response)
+                    pattern['cluster_id'] = idx
+                    pattern['canonical_score'] = score
+                    canonical_patterns.append(pattern)
+                except:
+                    logger.warning(f"列 '{col_name}' 聚类{idx} 无法解析LLM响应")
+                    canonical_patterns.append({
+                        'pattern_name': f'Pattern_{idx}',
+                        'pattern_description': f'Cluster {idx} pattern',
+                        'regex_pattern': 'N/A',
+                        'key_characteristics': [],
+                        'example_valid_values': samples[:3],
+                        'common_errors': [],
+                        'cluster_id': idx,
+                        'canonical_score': score
+                    })
+        except Exception as e:
+            logger.error(f"分析列 '{col_name}' 聚类{idx} 标准模式时出错: {str(e)}")
+            canonical_patterns.append({
+                'pattern_name': f'Pattern_{idx}',
+                'pattern_description': f'Cluster {idx} pattern',
+                'regex_pattern': 'N/A',
+                'key_characteristics': [],
+                'example_valid_values': samples[:3] if samples else [],
+                'common_errors': [],
+                'cluster_id': idx,
+                'canonical_score': score
+            })
+    
+    return canonical_patterns
+
+
+def calculate_pattern_similarity_feature(value, canonical_patterns):
+    """计算值与最相似标准模式的相似度特征"""
+    if not canonical_patterns or len(canonical_patterns) == 0:
+        return 0.0, -1
+    
+    value_str = str(value)
+    max_similarity = 0.0
+    best_pattern_idx = 0
+    
+    for i, pattern in enumerate(canonical_patterns):
+        example_values = pattern.get('example_valid_values', [])
+        if example_values:
+            similarities = [calculate_string_similarity(value_str, str(ex)) for ex in example_values]
+            pattern_sim = max(similarities) if similarities else 0.0
+        else:
+            pattern_sim = 0.0
+        
+        regex_pattern = pattern.get('regex_pattern', 'N/A')
+        if regex_pattern and regex_pattern != 'N/A':
+            try:
+                if re.match(regex_pattern, value_str):
+                    pattern_sim = max(pattern_sim, 0.8)
+            except:
+                pass
+        
+        if pattern_sim > max_similarity:
+            max_similarity = pattern_sim
+            best_pattern_idx = i
+    
+    return max_similarity, best_pattern_idx
+
+
+def save_distribution_analysis_results(analysis_results, canonical_patterns_dict, resp_path, logger):
+    """保存分布分析结果到文件"""
+    dist_analysis_dir = os.path.join(resp_path, 'distribution_analysis')
+    os.makedirs(dist_analysis_dir, exist_ok=True)
+    
+    clustering_results = {}
+    for attr, result in analysis_results.items():
+        if result is None:
+            continue
+        clustering_results[attr] = {
+            'n_clusters': result['n_clusters'],
+            'cluster_centers': result['cluster_centers'],
+            'cluster_indices': result['cluster_indices'],
+            'center_values': result['center_values'],
+            'canonical_scores': result['canonical_scores'],
+            'score_components': result['score_components'],
+            'canonical_probs': result['canonical_probs'],
+            'top_canonical_indices': result['top_canonical_indices'],
+            'noise_indices': result['noise_indices']
+        }
+    
+    clustering_file = os.path.join(dist_analysis_dir, 'clustering_results.json')
+    with open(clustering_file, 'w', encoding='utf-8') as f:
+        json.dump(clustering_results, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+    logger.info(f"聚类结果已保存到: {clustering_file}")
+    
+    for attr, result in analysis_results.items():
+        if result is None:
+            continue
+        cluster_values_file = os.path.join(dist_analysis_dir, f'{attr}_cluster_values.json')
+        with open(cluster_values_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                'cluster_values': result['cluster_values'],
+                'cluster_indices': result['cluster_indices']
+            }, f, ensure_ascii=False, indent=2)
+    
+    patterns_file = os.path.join(dist_analysis_dir, 'canonical_patterns.json')
+    with open(patterns_file, 'w', encoding='utf-8') as f:
+        json.dump(canonical_patterns_dict, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+    logger.info(f"标准模式已保存到: {patterns_file}")
+    
+    return dist_analysis_dir
+
+
+def process_distribution_analysis_for_all_columns(dirty_csv, all_attrs, config, resp_path, logger):
+    """对所有列执行分布分析流程"""
+    distribution_analysis_results = {}
+    canonical_patterns_dict = {}
+    use_distribution_analysis = {}
+    
+    if not config.get('enabled', False):
+        logger.info("分布分析方法未启用")
+        for attr in all_attrs:
+            use_distribution_analysis[attr] = False
+        return distribution_analysis_results, canonical_patterns_dict, use_distribution_analysis
+    
+    logger.info("开始分布分析流程...")
+    
+    for col_num, attr in enumerate(all_attrs):
+        logger.info(f"\n处理列 '{attr}' ({col_num + 1}/{len(all_attrs)})")
+        
+        analysis_result = perform_distribution_analysis(dirty_csv, col_num, attr, config, logger)
+        
+        if analysis_result is None:
+            logger.warning(f"列 '{attr}' 分布分析失败，使用原方法")
+            use_distribution_analysis[attr] = False
+            continue
+        
+        center_values = analysis_result['center_values'][:config.get('max_cluster_centers', 20)]
+        need_analysis = ask_llm_for_distribution_analysis(attr, center_values, logger)
+        
+        if not need_analysis:
+            logger.info(f"列 '{attr}' 不需要分布分析，使用原方法")
+            use_distribution_analysis[attr] = False
+            distribution_analysis_results[attr] = analysis_result
+            continue
+        
+        logger.info(f"列 '{attr}' 需要分布分析")
+        use_distribution_analysis[attr] = True
+        distribution_analysis_results[attr] = analysis_result
+        
+        canonical_patterns = analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger)
+        canonical_patterns_dict[attr] = canonical_patterns
+        
+        logger.info(f"列 '{attr}' 分析完成，识别出 {len(canonical_patterns)} 个标准模式")
+    
+    if distribution_analysis_results:
+        save_distribution_analysis_results(
+            distribution_analysis_results, canonical_patterns_dict, resp_path, logger
+        )
+    
+    return distribution_analysis_results, canonical_patterns_dict, use_distribution_analysis
+
+
+# ==================== 分布分析方法相关函数结束 ====================
+
 
 
 def calculate_llm_consistency(label_history):
@@ -221,7 +904,7 @@ def get_indices_from_optimal_cluster(optimal_cluster_info_dict):
 
 
 def make_predictions_with_proba(col, attr, dirty_csv, model_col, related_attrs_dict, 
-                                 funcs_for_attr, feature_all_dict, resp_path):
+                                 funcs_for_attr, feature_all_dict, resp_path, canonical_patterns=None):
     """
     预测并返回概率值
     
@@ -238,7 +921,7 @@ def make_predictions_with_proba(col, attr, dirty_csv, model_col, related_attrs_d
     results = []
     for idx in range(len(dirty_csv)):
         cell_val = dirty_csv.loc[idx, [attr]+related_attrs].to_dict()
-        result = single_val_feat(cell_val, None, funcs_for_attr, attr, idx, columns, feature_all_dict, resp_path)
+        result = single_val_feat(cell_val, None, funcs_for_attr, attr, idx, columns, feature_all_dict, resp_path, canonical_patterns=canonical_patterns)
         results.append(result)
     
     sorted_results = sorted([(r[0], r[1]) for r in results])
@@ -287,7 +970,7 @@ def save_confidence_samples(high_conf_dict, mid_conf_dict, save_path):
 
 
 def compute_f1_score_for_iteration(model_col, dirty_csv, clean_csv, all_attrs, related_attrs_dict, 
-                                    funcs_for_attr, feature_all_dict, resp_path, logger):
+                                    funcs_for_attr, feature_all_dict, resp_path, logger, canonical_patterns_dict=None):
     """
     使用当前模型对整个脏数据进行预测并计算F1分数
     
@@ -301,9 +984,12 @@ def compute_f1_score_for_iteration(model_col, dirty_csv, clean_csv, all_attrs, r
         if attr not in model_col:
             continue
         
+        # 获取该列的标准模式（如果有）
+        attr_canonical_patterns = canonical_patterns_dict.get(attr, None) if canonical_patterns_dict else None
         wrong_cells = make_predictions(
             col, attr, dirty_csv, model_col, related_attrs_dict,
-            funcs_for_attr, feature_all_dict, resp_path
+            funcs_for_attr, feature_all_dict, resp_path,
+            canonical_patterns=attr_canonical_patterns
         )
         det_wrong_list.extend(wrong_cells)
     
@@ -337,7 +1023,8 @@ def compute_f1_score_for_iteration(model_col, dirty_csv, clean_csv, all_attrs, r
 
 def llm_label_indices(attr_name, indices, dirty_csv, related_attrs_dict, 
                       high_confidence_right_dict, high_confidence_wrong_dict,
-                      error_checking_res_directory, err_check_val_num_per_query=20):
+                      error_checking_res_directory, err_check_val_num_per_query=20,
+                      canonical_patterns=None):
     """
     对指定的indices进行LLM标注，累积保存标注文件，并返回当前标注结果
     
@@ -358,7 +1045,14 @@ def llm_label_indices(attr_name, indices, dirty_csv, related_attrs_dict,
     for sub_list_values, sub_list_indices in zip(split_values, split_indices):
         try:
             vals_str = '\n'.join(sub_list_values)
-            prompt = error_check_prompt(vals_str, attr_name, high_confidence_right_dict, high_confidence_wrong_dict)
+            # 根据是否有标准模式选择不同的prompt
+            if canonical_patterns and len(canonical_patterns) > 0:
+                prompt = error_check_with_canonical_prompt(
+                    vals_str, attr_name, high_confidence_right_dict, 
+                    high_confidence_wrong_dict, canonical_patterns
+                )
+            else:
+                prompt = error_check_prompt(vals_str, attr_name, high_confidence_right_dict, high_confidence_wrong_dict)
             
             response = query_base(prompt)
             response = fix_error_flags(response)
@@ -621,7 +1315,7 @@ def normalize_string(s):
 
 
 def process_attr_train_feat(attr, dirty_csv, train_data_dict, related_attrs_dict, 
-                            funcs_for_attr, feature_all_dict, resp_path):
+                            funcs_for_attr, feature_all_dict, resp_path, canonical_patterns=None):
     """处理属性的训练特征"""
     fasttext_model = fasttext.load_model('./cc.en.300.bin')
     fasttext_dimension = len(dirty_csv.columns)
@@ -637,14 +1331,16 @@ def process_attr_train_feat(attr, dirty_csv, train_data_dict, related_attrs_dict
     
     for idx, val in tqdm(right_samples, ncols=120, desc=f"Processing {attr} right values"):
         feature = single_val_feat(val, fasttext_model, funcs_for_attr, attr, -1, 
-                                  list(dirty_csv.columns), feature_all_dict, resp_path)
+                                  list(dirty_csv.columns), feature_all_dict, resp_path,
+                                  canonical_patterns=canonical_patterns)
         if feature:
             feature_list.append(feature)
             label_list.append(0)
     
     for idx, val in tqdm(wrong_samples, ncols=120, desc=f"Processing {attr} wrong values"):
         feature = single_val_feat(val, fasttext_model, funcs_for_attr, attr, -1, 
-                                  list(dirty_csv.columns), feature_all_dict, resp_path)
+                                  list(dirty_csv.columns), feature_all_dict, resp_path,
+                                  canonical_patterns=canonical_patterns)
         if feature:
             feature_list.append(feature)
             label_list.append(1)
@@ -652,7 +1348,7 @@ def process_attr_train_feat(attr, dirty_csv, train_data_dict, related_attrs_dict
     return attr, feature_list, label_list
 
 
-def single_val_feat(val, fasttext_m, funcs_for_attr, attr, idx, all_attrs, feature_all_dict, resp_path):
+def single_val_feat(val, fasttext_m, funcs_for_attr, attr, idx, all_attrs, feature_all_dict, resp_path, canonical_patterns=None):
     feature = []
     
     # 函数特征
@@ -670,6 +1366,16 @@ def single_val_feat(val, fasttext_m, funcs_for_attr, attr, idx, all_attrs, featu
             else:
                 for a_val in val:
                     feature.extend(fasttext_m.get_word_vector(str(a_val)))
+        # 添加标准模式相似度特征（如果有）
+        if canonical_patterns and len(canonical_patterns) > 0:
+            # 获取当前列的值
+            if isinstance(val, dict):
+                attr_val = val.get(attr, '')
+            else:
+                attr_val = str(val)
+            pattern_sim, _ = calculate_pattern_similarity_feature(attr_val, canonical_patterns)
+            feature.append(pattern_sim)
+        
         return feature
     else:
         # 预测时从缓存获取
@@ -705,10 +1411,20 @@ def single_val_feat(val, fasttext_m, funcs_for_attr, attr, idx, all_attrs, featu
                 for a_val in val:
                     fasttext_feat.extend(fasttext_m.get_word_vector(str(a_val)))
             feature.extend(fasttext_feat)
+        
+        # 添加标准模式相似度特征（如果有）
+        if canonical_patterns and len(canonical_patterns) > 0:
+            if isinstance(val, dict):
+                attr_val = val.get(attr, '')
+            else:
+                attr_val = str(val)
+            pattern_sim, _ = calculate_pattern_similarity_feature(attr_val, canonical_patterns)
+            feature.append(pattern_sim)
+        
         return idx, feature
 
 
-def make_predictions(col, attr, dirty_csv, model_col, related_attrs_dict, funcs_for_attr, feature_all_dict, resp_path):
+def make_predictions(col, attr, dirty_csv, model_col, related_attrs_dict, funcs_for_attr, feature_all_dict, resp_path, canonical_patterns=None):
     if attr not in model_col.keys():
         return []
     model = model_col[attr]
@@ -718,7 +1434,7 @@ def make_predictions(col, attr, dirty_csv, model_col, related_attrs_dict, funcs_
     results = []
     for idx in range(len(dirty_csv)):
         cell_val = dirty_csv.loc[idx, [attr]+related_attrs].to_dict()
-        result = single_val_feat(cell_val, None, funcs_for_attr, attr, idx, columns, feature_all_dict, resp_path)
+        result = single_val_feat(cell_val, None, funcs_for_attr, attr, idx, columns, feature_all_dict, resp_path, canonical_patterns=canonical_patterns)
         results.append(result)
     
     sorted_results = sorted([(r[0], r[1]) for r in results])
@@ -1331,6 +2047,18 @@ if __name__ == "__main__":
     COMPUTE_F1_PER_ITERATION = config['model'].get('compute_f1_per_iteration', False)
     RESULT_ANALYZE = config['model'].get('result_analyze', False)
 
+    
+    # 分布分析配置
+    DISTRIBUTION_ANALYSIS_CONFIG = config['model'].get('distribution_analysis', {
+        'enabled': False,
+        'eps': 0.3,
+        'max_cluster_centers': 20,
+        'top_canonical_clusters': 2,
+        'max_samples_per_cluster': 10,
+        'alpha': 0.4,
+        'beta': 0.3,
+        'gamma': 0.3
+    })
     # Dataset settings
     base_dir = config['data']['base_dir']
     err_rate_list = config['data']['err_rate_list']
@@ -1389,6 +2117,30 @@ if __name__ == "__main__":
                 )
             total_time += t.duration
             
+            
+            # ==================== 步骤2.5: 分布分析（可选） ====================
+            distribution_analysis_results = {}
+            canonical_patterns_dict = {}
+            use_distribution_analysis = {}
+            
+            if DISTRIBUTION_ANALYSIS_CONFIG.get('enabled', False):
+                logger.info("分布分析方法已启用")
+                with Timer('Distribution Analysis', logger, time_file) as t:
+                    distribution_analysis_results, canonical_patterns_dict, use_distribution_analysis = \
+                        process_distribution_analysis_for_all_columns(
+                            dirty_csv, all_attrs, DISTRIBUTION_ANALYSIS_CONFIG, resp_path, logger
+                        )
+                total_time += t.duration
+                
+                # 记录哪些列使用了分布分析
+                dist_analysis_attrs = [attr for attr, use in use_distribution_analysis.items() if use]
+                logger.info(f"使用分布分析的列: {dist_analysis_attrs}")
+                para_file.write(f"Distribution analysis enabled for: {dist_analysis_attrs}\n")
+            else:
+                logger.info("分布分析方法未启用，使用原方法")
+                for attr in all_attrs:
+                    use_distribution_analysis[attr] = False
+            
             # ==================== 步骤3: 聚类 ====================
             cluster_index_dict, center_value_dict = {}, {}
             feature_all_dict = defaultdict(default_dict_of_lists)
@@ -1443,10 +2195,14 @@ if __name__ == "__main__":
                             continue
                         
                         # 调用LLM标注
+                        # 获取该列的标准模式（如果有）
+                        attr_canonical_patterns = canonical_patterns_dict.get(attr_name, None)
+                        
                         result = llm_label_indices(
                             attr_name, indices, dirty_csv, related_attrs_dict,
                             high_confidence_right_dict, high_confidence_wrong_dict,
-                            error_checking_res_directory, err_check_val_num_per_query
+                            error_checking_res_directory, err_check_val_num_per_query,
+                            canonical_patterns=attr_canonical_patterns
                         )
                         
                         # 将结果累积到历史标注中
@@ -1527,9 +2283,12 @@ if __name__ == "__main__":
                 label_dict_train = {}
                 
                 for attr in all_attrs:
+                    # 获取该列的标准模式（如果有）
+                    attr_canonical_patterns = canonical_patterns_dict.get(attr, None)
                     attr_name, feature_list, label_list = process_attr_train_feat(
                         attr, dirty_csv, train_data_dict, related_attrs_dict,
-                        funcs_for_attr, feature_all_dict, resp_path
+                        funcs_for_attr, feature_all_dict, resp_path,
+                        canonical_patterns=attr_canonical_patterns
                     )
                     feat_dict_train[attr] = feature_list
                     label_dict_train[attr] = label_list
@@ -1618,10 +2377,14 @@ if __name__ == "__main__":
                         if len(indices) == 0:
                             continue
                         
+                        # 获取该列的标准模式（如果有）
+                        attr_canonical_patterns = canonical_patterns_dict.get(attr_name, None)
+                        
                         result = llm_label_indices(
                             attr_name, indices, dirty_csv, related_attrs_dict,
                             high_confidence_right_dict, high_confidence_wrong_dict,
-                            error_checking_res_directory, err_check_val_num_per_query
+                            error_checking_res_directory, err_check_val_num_per_query,
+                            canonical_patterns=attr_canonical_patterns
                         )
                         
                         # 累积到历史标注
@@ -1638,9 +2401,12 @@ if __name__ == "__main__":
                         if attr not in model_col:
                             continue
                         
+                        # 获取该列的标准模式（如果有）
+                        attr_canonical_patterns = canonical_patterns_dict.get(attr, None)
                         predictions = make_predictions_with_proba(
                             col, attr, dirty_csv, model_col, related_attrs_dict,
-                            funcs_for_attr, feature_all_dict, resp_path
+                            funcs_for_attr, feature_all_dict, resp_path,
+                            canonical_patterns=attr_canonical_patterns
                         )
                         all_predictions[attr] = predictions
                         
@@ -1783,9 +2549,12 @@ if __name__ == "__main__":
                         label_dict_train = {}
                         
                         for attr in all_attrs:
+                            # 获取该列的标准模式（如果有）
+                            attr_canonical_patterns = canonical_patterns_dict.get(attr, None)
                             attr_name, feature_list, label_list = process_attr_train_feat(
                                 attr, dirty_csv, train_data_dict, related_attrs_dict,
-                                funcs_for_attr, feature_all_dict, resp_path
+                                funcs_for_attr, feature_all_dict, resp_path,
+                                canonical_patterns=attr_canonical_patterns
                             )
                             feat_dict_train[attr] = feature_list
                             label_dict_train[attr] = label_list
@@ -1950,7 +2719,8 @@ if __name__ == "__main__":
                     with Timer(f'Iteration {iteration+1} - Computing F1 Score', logger, time_file) as t:
                         precision, recall, f1, detected, total = compute_f1_score_for_iteration(
                             model_col, dirty_csv, clean_csv, all_attrs, related_attrs_dict,
-                            funcs_for_attr, feature_all_dict, resp_path, logger
+                            funcs_for_attr, feature_all_dict, resp_path, logger,
+                            canonical_patterns_dict=canonical_patterns_dict
                         )
                         
                         # 记录F1分数
@@ -2068,9 +2838,12 @@ if __name__ == "__main__":
                     label_dict_train = {}
                     
                     for attr in all_attrs:
+                        # 获取该列的标准模式（如果有）
+                        attr_canonical_patterns = canonical_patterns_dict.get(attr, None)
                         attr_name, feature_list, label_list = process_attr_train_feat(
                             attr, dirty_csv, train_data_dict, related_attrs_dict,
-                            funcs_for_attr, feature_all_dict, resp_path
+                            funcs_for_attr, feature_all_dict, resp_path,
+                            canonical_patterns=attr_canonical_patterns
                         )
                         feat_dict_train[attr] = feature_list
                         label_dict_train[attr] = label_list
@@ -2118,9 +2891,12 @@ if __name__ == "__main__":
             det_wrong_list_res = []
             with Timer('Final Prediction', logger, time_file) as t:
                 for col, attr in tqdm(enumerate(all_attrs), desc="Making final predictions", ncols=120):
+                    # 获取该列的标准模式（如果有）
+                    attr_canonical_patterns = canonical_patterns_dict.get(attr, None)
                     wrong_cells = make_predictions(
                         col, attr, dirty_csv, model_col, related_attrs_dict,
-                        funcs_for_attr, feature_all_dict, resp_path
+                        funcs_for_attr, feature_all_dict, resp_path,
+                        canonical_patterns=attr_canonical_patterns
                     )
                     for cell in wrong_cells:
                         if cell not in det_wrong_list_res:
