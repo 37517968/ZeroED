@@ -10,17 +10,30 @@ model:
   iterations: 10
   initial_llm_label_iterations: 5
   initial_llm_label_consistency_threshold: 1.0
-  train_high_confidence_threshold: 0.7
-  mid_confidence_threshold: 0.8
+  train_high_confidence_threshold: 0.8
+  mid_confidence_threshold: 0.7
   high_confidence_threshold: 0.95
   cluster_selection_window: 5  # 聚类选择窗口大小：-1表示不能选择任何选择过的聚类，0表示可以选择任意聚类，1表示不能选择上一次的聚类，2表示不能选择前两次的聚类
   compute_f1_per_iteration: true  # 是否在每次迭代中计算F1分数
   result_analyze: true  # 是否保存每轮的训练数据和分类器错误分类结果用于分析
+  
+  # 分布分析方法配置
+  distribution_analysis:
+    enabled: true  # 是否开启分布分析方法
+    eps: 0.5  # DBSCAN聚类的距离阈值ε (经验值: 0.25-0.35)
+    max_cluster_centers: 20  # LLM分析的最大聚类中心数
+    top_canonical_clusters: 2  # 选择前几个作为Canonical簇
+    max_samples_per_cluster: 10  # 每个簇中用于LLM分析的最大样本数
+    # Canonical Score权重参数 (α + β + γ + δ = 1.0)
+    alpha: 0.25  # 频率项权重
+    beta: 0.15   # 规则性项权重
+    gamma: 0.15  # 紧致性项权重
+    delta: 0.45  # LLM规范性项权重（较大权重，确保空值等明显错误不会获得高分）
 
 data:
   base_dir: '.'
   err_rate_list: ["01"]
   all_set_num: 1
-  datasets: ['test']  # ''  test
+  datasets: [ 'rayyan', 'beers', 'hospital', 'flights']  # ''  test 'hospital', 'flights' 'beers',
   result_dir: 'results'
   err_check_val_num_per_query: 20
