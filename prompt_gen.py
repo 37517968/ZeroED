@@ -482,3 +482,62 @@ Please respond with ONLY a single decimal number between 0.0 and 1.0 representin
 Do not include any explanation, just the number.
 """
     return prompt
+
+
+def llm_compare_patterns_canonicality_prompt(attr_name, patterns_with_samples):
+    """
+    生成让LLM比较多个规范并给出规范性分数的prompt
+    
+    Args:
+        attr_name: 属性名称
+        patterns_with_samples: 列表，每个元素是 (pattern_description, sample_values, cluster_size)
+    """
+    patterns_str = ""
+    for i, (pattern_desc, samples, cluster_size) in enumerate(patterns_with_samples, 1):
+        # 格式化样本展示（最多3个不同的样本）
+        if len(samples) == 0:
+            samples_str = "(no samples)"
+        elif len(samples) == 1:
+            samples_str = f'"{samples[0]}"'
+        elif len(samples) == 2:
+            samples_str = f'"{samples[0]}", "{samples[1]}"'
+        else:
+            samples_str = ', '.join([f'"{s}"' for s in samples])
+        
+        patterns_str += f"\n**Pattern {i}** (Cluster size: {cluster_size}):\n"
+        patterns_str += f"Description: {pattern_desc}\n"
+        patterns_str += f"Sample values (up to 3 diverse examples): {samples_str}\n"
+    
+    prompt = f"""You are a data quality expert. Please evaluate and compare the following patterns found in the '{attr_name}' column.
+
+{patterns_str}
+
+Your task:
+1. Evaluate the canonicality (validity/correctness) of each pattern
+2. If there are conflicting patterns, identify which one(s) are more reasonable/canonical
+3. Assign a canonicality score (0.0-1.0) to each pattern
+
+Scoring guidelines:
+- **Conflicting patterns**: If patterns conflict with each other, give higher scores (0.7-1.0) to the more reasonable/canonical pattern(s), and lower scores (0.0-0.3) to the less reasonable ones
+- **Invalid patterns**: Empty values, null, 'nan', 'N/A', placeholder values should get very low scores (0.0-0.2)
+- **Valid patterns**: Clear, well-formatted, canonical patterns should get high scores (0.7-1.0)
+- **Uncertain patterns**: Ambiguous or questionable patterns should get medium scores (0.3-0.6)
+
+Please respond in the following JSON format:
+```json
+{{
+  "pattern_1": {{
+    "score": 0.0-1.0,
+    "reasoning": "Brief explanation"
+  }},
+  "pattern_2": {{
+    "score": 0.0-1.0,
+    "reasoning": "Brief explanation"
+  }},
+  ...
+}}
+```
+
+Only respond with the JSON, no additional text.
+"""
+    return prompt

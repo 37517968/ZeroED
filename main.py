@@ -30,7 +30,7 @@ from prompt_gen import (create_err_gen_inst_prompt, err_clean_func_prompt,
                         create_clean_gen_inst_prompt, create_dirty_gen_inst_prompt,
                         guide_gen_prompt, distribution_analysis_decision_prompt,
                         canonical_pattern_analysis_prompt, error_check_with_canonical_prompt,
-                        llm_canonicality_score_prompt
+                        llm_canonicality_score_prompt, llm_compare_patterns_canonicality_prompt
                         )
 from utility import (Logger, Timer, copy_file,
                      default_dict_of_lists, get_ans_from_llm, query_base,
@@ -354,7 +354,7 @@ def get_llm_canonicality_score(attr_name, sample_values, logger=None):
         return 0.5
 
 
-def calculate_canonical_score(cluster_values, total_samples, alpha=0.25, beta=0.15, gamma=0.15, delta=0.45, 
+def calculate_canonical_score(cluster_values, total_samples, alpha=0.25, beta=0.15, gamma=0.15, delta=0.45,
                               attr_name=None, logger=None, use_llm_score=True):
     """
     计算聚类的规范得分（Canonical Score）
@@ -455,14 +455,182 @@ def calculate_canonical_probability(scores):
     return probabilities.tolist()
 
 
+def get_cluster_pattern_description(cluster_values):
+    """
+    获取聚类的模式描述
+    
+    Args:
+        cluster_values: 聚类中的值列表
+    
+    Returns:
+        pattern_description: 模式描述字符串
+    """
+    from feature import L2_str_agg
+    from collections import Counter
+    
+    if len(cluster_values) == 0:
+        return "Empty cluster"
+    
+    # 获取所有值的 pattern
+    patterns = [L2_str_agg(str(v)) for v in cluster_values]
+    pattern_counter = Counter(patterns)
+    most_common_pattern = pattern_counter.most_common(1)[0][0] if pattern_counter else "Unknown"
+    
+    # 基本统计
+    avg_length = sum(len(str(v)) for v in cluster_values) / len(cluster_values)
+    
+    # 检查特殊值
+    special_values = ['', 'nan', 'null', 'none', 'n/a', 'na', '-', '--']
+    special_count = sum(1 for v in cluster_values if str(v).lower().strip() in special_values)
+    
+    if special_count > len(cluster_values) * 0.5:
+        return f"Mostly empty/null values (pattern: {most_common_pattern})"
+    
+    # 构建描述
+    description = f"Pattern: {most_common_pattern}, Avg length: {avg_length:.1f}"
+    
+    return description
+
+
+def select_diverse_samples(cluster_values, max_samples=3):
+    """
+    从聚类值中选择尽可能不同的样本
+    
+    Args:
+        cluster_values: 聚类中的所有值
+        max_samples: 最多选择的样本数
+    
+    Returns:
+        selected_samples: 选中的样本列表
+    """
+    if len(cluster_values) == 0:
+        return []
+    
+    # 转换为字符串并去重
+    unique_values = []
+    seen = set()
+    for val in cluster_values:
+        val_str = str(val).strip()
+        if val_str not in seen:
+            unique_values.append(val_str)
+            seen.add(val_str)
+            if len(unique_values) >= max_samples:
+                break
+    
+    # 如果唯一值少于max_samples，返回所有唯一值
+    if len(unique_values) <= max_samples:
+        return unique_values
+    
+    # 如果有足够的唯一值，选择最不同的几个
+    # 简单策略：选择长度差异最大的样本
+    selected = [unique_values[0]]  # 先选第一个
+    
+    for _ in range(max_samples - 1):
+        max_diff = -1
+        best_candidate = None
+        
+        for candidate in unique_values:
+            if candidate in selected:
+                continue
+            
+            # 计算与已选样本的最小差异
+            min_diff = float('inf')
+            for selected_val in selected:
+                # 使用长度差异和字符差异
+                len_diff = abs(len(candidate) - len(selected_val))
+                char_diff = sum(1 for a, b in zip(candidate, selected_val) if a != b)
+                diff = len_diff + char_diff
+                min_diff = min(min_diff, diff)
+            
+            if min_diff > max_diff:
+                max_diff = min_diff
+                best_candidate = candidate
+        
+        if best_candidate:
+            selected.append(best_candidate)
+        else:
+            break
+    
+    return selected
+
+
+def get_llm_scores_for_patterns(attr_name, cluster_info_list, logger):
+    """
+    使用LLM比较多个聚类规范并给出分数
+    
+    Args:
+        attr_name: 属性名称
+        cluster_info_list: 列表，每个元素是 (cluster_idx, pattern_desc, sample_values, cluster_size)
+        logger: 日志记录器
+    
+    Returns:
+        scores_dict: {cluster_idx: llm_score}
+    """
+    if len(cluster_info_list) == 0:
+        return {}
+    
+    # 准备数据
+    patterns_with_samples = []
+    cluster_indices = []
+    for cluster_idx, pattern_desc, samples, cluster_size in cluster_info_list:
+        patterns_with_samples.append((pattern_desc, samples, cluster_size))
+        cluster_indices.append(cluster_idx)
+    
+    # 调用LLM
+    prompt = llm_compare_patterns_canonicality_prompt(attr_name, patterns_with_samples)
+    
+    try:
+        response = query_base(prompt)
+        
+        # 解析JSON响应
+        json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            json_str = response
+        
+        scores_data = json.loads(json_str)
+        
+        # 提取分数
+        scores_dict = {}
+        for i, cluster_idx in enumerate(cluster_indices, 1):
+            pattern_key = f"pattern_{i}"
+            if pattern_key in scores_data:
+                score = scores_data[pattern_key].get('score', 0.5)
+                reasoning = scores_data[pattern_key].get('reasoning', '')
+                scores_dict[cluster_idx] = score
+                logger.info(f"  聚类{cluster_idx} LLM分数: {score:.2f} - {reasoning}")
+            else:
+                scores_dict[cluster_idx] = 0.5
+                logger.warning(f"  聚类{cluster_idx} 未找到LLM分数，使用默认值0.5")
+        
+        return scores_dict
+        
+    except Exception as e:
+        logger.error(f"获取LLM规范性分数时出错: {str(e)}")
+        # 返回默认分数
+        return {cluster_idx: 0.5 for cluster_idx, _, _, _ in cluster_info_list}
+
+
 def perform_distribution_analysis(dirty_csv, col_num, col_name, config, logger):
-    """执行分布分析方法"""
+    """
+    执行分布分析方法
+    
+    新逻辑：
+    1. 对聚类数量>=10的聚类总结规范（最多10个，按聚类大小排序）
+    2. LLM比较这些规范并给出分数
+    3. 使用LLM分数计算canonical score
+    4. 只保留分数高于阈值的规范
+    """
     eps = config.get('eps', 0.3)
     max_cluster_centers = config.get('max_cluster_centers', 20)
-    top_canonical_clusters = config.get('top_canonical_clusters', 2)
-    alpha = config.get('alpha', 0.4)
-    beta = config.get('beta', 0.3)
-    gamma = config.get('gamma', 0.3)
+    min_cluster_size_for_pattern = config.get('min_cluster_size_for_pattern', 10)
+    max_patterns_to_compare = config.get('max_patterns_to_compare', 10)
+    canonical_score_threshold = config.get('canonical_score_threshold', 0.5)
+    alpha = config.get('alpha', 0.25)
+    beta = config.get('beta', 0.15)
+    gamma = config.get('gamma', 0.15)
+    delta = config.get('delta', 0.45)
     
     logger.info(f"对列 '{col_name}' 执行分布分析，eps={eps}")
     
@@ -475,28 +643,79 @@ def perform_distribution_analysis(dirty_csv, col_num, col_name, config, logger):
     logger.info(f"列 '{col_name}' 聚类完成，共 {cluster_result['n_clusters']} 个聚类")
     
     total_samples = len(dirty_csv)
+    
+    # 步骤1: 筛选聚类数量>=min_cluster_size_for_pattern的聚类
+    large_clusters = []
+    for idx, cluster_values in enumerate(cluster_result['cluster_values']):
+        if len(cluster_values) >= min_cluster_size_for_pattern:
+            large_clusters.append((idx, cluster_values, len(cluster_values)))
+    
+    logger.info(f"列 '{col_name}' 有 {len(large_clusters)} 个聚类大小>={min_cluster_size_for_pattern}")
+    
+    # 按聚类大小排序，取前max_patterns_to_compare个
+    large_clusters.sort(key=lambda x: x[2], reverse=True)
+    large_clusters = large_clusters[:max_patterns_to_compare]
+    
+    # 步骤2: 为这些聚类生成规范描述
+    cluster_info_list = []
+    for cluster_idx, cluster_values, cluster_size in large_clusters:
+        pattern_desc = get_cluster_pattern_description(cluster_values)
+        sample_values = select_diverse_samples(cluster_values, max_samples=3)  # 选择3个尽可能不同的样本
+        cluster_info_list.append((cluster_idx, pattern_desc, sample_values, cluster_size))
+        logger.info(f"  聚类{cluster_idx} (大小={cluster_size}): {pattern_desc}")
+    
+    # 步骤3: 使用LLM比较规范并获取分数
+    llm_scores_dict = {}
+    if len(cluster_info_list) > 0:
+        logger.info(f"使用LLM比较 {len(cluster_info_list)} 个规范...")
+        llm_scores_dict = get_llm_scores_for_patterns(col_name, cluster_info_list, logger)
+    
+    # 步骤4: 计算所有聚类的canonical score（使用LLM分数）
     canonical_scores = []
     score_components = []
     
-    # 从配置中获取delta参数（LLM规范性权重）
-    delta = config.get('delta', 0.45)
-    
-    for cluster_values in cluster_result['cluster_values']:
+    for idx, cluster_values in enumerate(cluster_result['cluster_values']):
+        # 获取该聚类的LLM分数（如果有）
+        llm_score = llm_scores_dict.get(idx, None)
+        
+        # 如果没有LLM分数（小聚类），使用默认的规范性评估
+        if llm_score is None:
+            # 对于小聚类，使用简单的规则评估
+            special_values = ['', 'nan', 'null', 'none', 'n/a', 'na', '-', '--']
+            invalid_count = sum(1 for v in cluster_values if str(v).lower().strip() in special_values)
+            if invalid_count > len(cluster_values) * 0.5:
+                llm_score = 0.1  # 大部分是无效值
+            else:
+                llm_score = 0.5  # 默认中等分数
+        
+        # 计算canonical score
         score, components = calculate_canonical_score(
             cluster_values, total_samples, alpha, beta, gamma, delta,
-            attr_name=col_name, logger=logger, use_llm_score=True
+            attr_name=col_name, logger=None, use_llm_score=False  # 直接使用llm_score
         )
+        
+        # 手动添加LLM分数到components
+        components['llm_canon'] = llm_score
+        
+        # 重新计算总分（包含LLM分数）
+        score = alpha * components['freq'] + beta * components['reg'] + gamma * components['compact'] + delta * llm_score
+        
         canonical_scores.append(score)
         score_components.append(components)
     
+    # 步骤5: 只保留分数高于阈值的聚类作为canonical
+    canonical_indices = []
+    for idx, score in enumerate(canonical_scores):
+        if score >= canonical_score_threshold:
+            canonical_indices.append(idx)
+    
+    canonical_indices.sort(key=lambda idx: canonical_scores[idx], reverse=True)
+    
+    logger.info(f"列 '{col_name}' 有 {len(canonical_indices)} 个聚类的分数>={canonical_score_threshold}")
+    for i, idx in enumerate(canonical_indices[:5]):  # 只显示前5个
+        logger.info(f"  Canonical {i+1}: 聚类{idx}, Score={canonical_scores[idx]:.4f}, LLM={score_components[idx]['llm_canon']:.2f}")
+    
     canonical_probs = calculate_canonical_probability(canonical_scores)
-    
-    sorted_indices = np.argsort(canonical_scores)[::-1]
-    top_canonical_indices = sorted_indices[:top_canonical_clusters].tolist()
-    
-    logger.info(f"列 '{col_name}' Top-{top_canonical_clusters} Canonical簇: {top_canonical_indices}")
-    for i, idx in enumerate(top_canonical_indices):
-        logger.info(f"  Canonical {i+1}: 聚类{idx}, Score={canonical_scores[idx]:.4f}, Prob={canonical_probs[idx]:.4f}")
     
     center_values = []
     for center_idx in cluster_result['cluster_centers'][:max_cluster_centers]:
@@ -513,9 +732,10 @@ def perform_distribution_analysis(dirty_csv, col_num, col_name, config, logger):
         'canonical_scores': canonical_scores,
         'score_components': score_components,
         'canonical_probs': canonical_probs,
-        'top_canonical_indices': top_canonical_indices,
+        'top_canonical_indices': canonical_indices,  # 所有高于阈值的聚类
         'noise_indices': cluster_result['noise_indices'],
-        'config': config
+        'config': config,
+        'llm_scores': llm_scores_dict
     }
     
     return analysis_result
@@ -549,6 +769,8 @@ def analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger):
     top_canonical_indices = analysis_result['top_canonical_indices']
     cluster_values = analysis_result['cluster_values']
     canonical_scores = analysis_result['canonical_scores']
+    score_components = analysis_result['score_components']
+    llm_scores = analysis_result.get('llm_scores', {})  # 获取LLM比较分数
     max_samples = analysis_result['config'].get('max_samples_per_cluster', 10)
     
     canonical_patterns = []
@@ -559,6 +781,7 @@ def analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger):
         
         samples = cluster_values[idx][:max_samples]
         score = canonical_scores[idx]
+        llm_canon_score = llm_scores.get(idx, score_components[idx].get('llm_canon', 0.5))
         
         prompt = canonical_pattern_analysis_prompt(col_name, samples, idx, score)
         
@@ -571,13 +794,15 @@ def analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger):
                 pattern = json.loads(pattern_json)
                 pattern['cluster_id'] = idx
                 pattern['canonical_score'] = score
+                pattern['llm_canonicality_score'] = llm_canon_score  # 添加LLM评分
                 canonical_patterns.append(pattern)
-                logger.info(f"列 '{col_name}' 聚类{idx} 标准模式: {pattern.get('pattern_name', 'Unknown')}")
+                logger.info(f"列 '{col_name}' 聚类{idx} 标准模式: {pattern.get('pattern_name', 'Unknown')}, LLM分数: {llm_canon_score:.2f}")
             else:
                 try:
                     pattern = json.loads(response)
                     pattern['cluster_id'] = idx
                     pattern['canonical_score'] = score
+                    pattern['llm_canonicality_score'] = llm_canon_score  # 添加LLM评分
                     canonical_patterns.append(pattern)
                 except:
                     logger.warning(f"列 '{col_name}' 聚类{idx} 无法解析LLM响应")
@@ -589,7 +814,8 @@ def analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger):
                         'example_valid_values': samples[:3],
                         'common_errors': [],
                         'cluster_id': idx,
-                        'canonical_score': score
+                        'canonical_score': score,
+                        'llm_canonicality_score': llm_canon_score  # 添加LLM评分
                     })
         except Exception as e:
             logger.error(f"分析列 '{col_name}' 聚类{idx} 标准模式时出错: {str(e)}")
@@ -601,7 +827,8 @@ def analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger):
                 'example_valid_values': samples[:3] if samples else [],
                 'common_errors': [],
                 'cluster_id': idx,
-                'canonical_score': score
+                'canonical_score': score,
+                'llm_canonicality_score': llm_canon_score  # 添加LLM评分
             })
     
     return canonical_patterns
@@ -684,7 +911,11 @@ def save_distribution_analysis_results(analysis_results, canonical_patterns_dict
 
 
 def process_distribution_analysis_for_all_columns(dirty_csv, all_attrs, config, resp_path, logger):
-    """对所有列执行分布分析流程"""
+    """
+    对所有列执行分布分析流程
+    
+    修改：默认对所有列使用分布分析，不再询问LLM是否需要
+    """
     distribution_analysis_results = {}
     canonical_patterns_dict = {}
     use_distribution_analysis = {}
@@ -695,11 +926,12 @@ def process_distribution_analysis_for_all_columns(dirty_csv, all_attrs, config, 
             use_distribution_analysis[attr] = False
         return distribution_analysis_results, canonical_patterns_dict, use_distribution_analysis
     
-    logger.info("开始分布分析流程...")
+    logger.info("开始分布分析流程（默认对所有列使用）...")
     
     for col_num, attr in enumerate(all_attrs):
         logger.info(f"\n处理列 '{attr}' ({col_num + 1}/{len(all_attrs)})")
         
+        # 执行分布分析
         analysis_result = perform_distribution_analysis(dirty_csv, col_num, attr, config, logger)
         
         if analysis_result is None:
@@ -707,24 +939,18 @@ def process_distribution_analysis_for_all_columns(dirty_csv, all_attrs, config, 
             use_distribution_analysis[attr] = False
             continue
         
-        center_values = analysis_result['center_values'][:config.get('max_cluster_centers', 20)]
-        need_analysis = ask_llm_for_distribution_analysis(attr, center_values, logger)
-        
-        if not need_analysis:
-            logger.info(f"列 '{attr}' 不需要分布分析，使用原方法")
-            use_distribution_analysis[attr] = False
-            distribution_analysis_results[attr] = analysis_result
-            continue
-        
-        logger.info(f"列 '{attr}' 需要分布分析")
+        # 默认使用分布分析（不再询问LLM）
+        logger.info(f"列 '{attr}' 使用分布分析")
         use_distribution_analysis[attr] = True
         distribution_analysis_results[attr] = analysis_result
         
+        # 分析canonical簇的标准模式
         canonical_patterns = analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger)
         canonical_patterns_dict[attr] = canonical_patterns
         
         logger.info(f"列 '{attr}' 分析完成，识别出 {len(canonical_patterns)} 个标准模式")
     
+    # 保存结果
     if distribution_analysis_results:
         save_distribution_analysis_results(
             distribution_analysis_results, canonical_patterns_dict, resp_path, logger
@@ -735,84 +961,6 @@ def process_distribution_analysis_for_all_columns(dirty_csv, all_attrs, config, 
 
 # ==================== 分布分析方法相关函数结束 ====================
 
-
-
-def calculate_llm_consistency(label_history):
-    """
-    计算LLM标注一致性分数
-    
-    Args:
-        label_history: 标签历史列表 [label1, label2, ...]
-    
-    Returns:
-        consistency_score: 一致性分数 (0-1)
-        majority_label: 多数标签
-    """
-    if not label_history or len(label_history) == 0:
-        return 0.0, 0
-    
-    counter = Counter(label_history)
-    majority_label, majority_count = counter.most_common(1)[0]
-    consistency_score = majority_count / len(label_history)
-    
-    return consistency_score, majority_label
-
-
-def calculate_prediction_stability(pred_history):
-    """
-    计算预测稳定性 Stab(x) = 1 - Var(p(1), ..., p(T))
-    
-    Args:
-        pred_history: 预测概率历史列表
-    
-    Returns:
-        stability: 稳定性分数
-    """
-    if not pred_history or len(pred_history) < 2:
-        return 1.0
-    
-    variance = np.var(pred_history)
-    stability = 1 - min(variance, 1.0)  # 确保稳定性在0-1之间
-    return stability
-
-
-def calculate_confidence_score(p, y_mlp_equals_y_llm, llm_consistency, alpha=0.7, beta=1.2):
-    """
-    计算置信度分数
-    Conf(x) = σ(α|p-0.5|(yMLP==yLLM) + β * CLLM-cons(x))
-    
-    Args:
-        p: 模型预测概率
-        y_mlp_equals_y_llm: MLP和LLM标注是否一致 (1或0)
-        llm_consistency: LLM标注一致性分数
-        alpha: α参数
-        beta: β参数
-    
-    Returns:
-        confidence: 置信度分数
-    """
-    score = alpha * abs(p - 0.5) * y_mlp_equals_y_llm + beta * llm_consistency
-    confidence = sigmoid(score)
-    return confidence
-
-
-def calculate_training_confidence(p, stability, alpha=0.7):
-    """
-    计算训练数据置信度
-    Conf(x) = α * 2 * |p - 0.5| + (1 - α) * Stab(x)
-    
-    Args:
-        p: 模型预测概率 (范围 [0, 1])
-        stability: 预测稳定性 (范围 [0, 1])
-        alpha: α参数，控制预测置信度和稳定性的权重
-    
-    Returns:
-        confidence: 置信度分数 (范围 [0, 1])
-    """
-    # 2 * |p - 0.5| 将 [0, 0.5] 归一化到 [0, 1]
-    normalized_pred_confidence = 2 * abs(p - 0.5)
-    confidence = alpha * normalized_pred_confidence + (1 - alpha) * stability
-    return confidence
 
 
 def convert_label_history_to_train_data(index_value_label_history, dirty_csv, related_attrs_dict, 
@@ -860,168 +1008,7 @@ def convert_label_history_to_train_data(index_value_label_history, dirty_csv, re
     return train_data_dict, final_labels
 
 
-def filter_unlabeled_indices(indices_dict, index_value_label_history):
-    """
-    过滤掉已经标注过的索引
-    
-    Args:
-        indices_dict: {attr: [idx1, idx2, ...]}
-        index_value_label_history: {attr: {idx: [label1, label2, ...]}}
-    
-    Returns:
-        filtered_indices_dict: 过滤后的索引字典
-        labeled_count: 已标注的数量
-    """
-    filtered_indices_dict = {}
-    labeled_count = 0
-    
-    for attr, indices in indices_dict.items():
-        labeled_indices = set(index_value_label_history.get(attr, {}).keys())
-        unlabeled_indices = [idx for idx in indices if idx not in labeled_indices]
-        filtered_indices_dict[attr] = unlabeled_indices
-        labeled_count += len(indices) - len(unlabeled_indices)
-    
-    return filtered_indices_dict, labeled_count
-
-
-def get_indices_from_optimal_cluster(optimal_cluster_info_dict):
-    """
-    从最优聚类信息中提取索引
-    
-    Args:
-        optimal_cluster_info_dict: {attr: {'cluster_idx': ..., 'cluster_indices': [...], ...}}
-    
-    Returns:
-        indices_dict: {attr: [idx1, idx2, ...]}
-    """
-    indices_dict = {}
-    for attr, cluster_info in optimal_cluster_info_dict.items():
-        if cluster_info is not None:
-            indices_dict[attr] = list(cluster_info['cluster_indices'])
-        else:
-            indices_dict[attr] = []
-    return indices_dict
-
-
-def make_predictions_with_proba(col, attr, dirty_csv, model_col, related_attrs_dict, 
-                                 funcs_for_attr, feature_all_dict, resp_path, canonical_patterns=None):
-    """
-    预测并返回概率值
-    
-    Returns:
-        predictions: [(idx, attr, pred_label, pred_proba), ...]
-    """
-    if attr not in model_col.keys():
-        return []
-    
-    model = model_col[attr]
-    related_attrs = list(related_attrs_dict[attr])
-    columns = list(dirty_csv.columns)
-    
-    results = []
-    for idx in range(len(dirty_csv)):
-        cell_val = dirty_csv.loc[idx, [attr]+related_attrs].to_dict()
-        result = single_val_feat(cell_val, None, funcs_for_attr, attr, idx, columns, feature_all_dict, resp_path, canonical_patterns=canonical_patterns)
-        results.append(result)
-    
-    sorted_results = sorted([(r[0], r[1]) for r in results])
-    test_feat_list = [feat for idx, feat in sorted_results]
-    
-    test_feat_np = np.array(test_feat_list)
-    pred_labels = model.predict(test_feat_np)
-    
-    # 获取预测概率
-    if hasattr(model, 'predict_proba'):
-        pred_probas = model.predict_proba(test_feat_np)
-        # 取正类（错误类）的概率
-        pred_probas = pred_probas[:, 1] if pred_probas.shape[1] > 1 else pred_probas[:, 0]
-    else:
-        pred_probas = pred_labels.astype(float)
-    
-    predictions = []
-    for idx in range(len(dirty_csv)):
-        predictions.append((idx, attr, pred_labels[idx], pred_probas[idx]))
-    
-    return predictions
-
-
-def save_confidence_samples(high_conf_dict, mid_conf_dict, save_path):
-    """
-    保存高置信度和中等置信度样本到文件
-    """
-    with open(os.path.join(save_path, 'high_confidence_samples.json'), 'w', encoding='utf-8') as f:
-        # 转换为可序列化格式
-        serializable = {}
-        for attr, samples in high_conf_dict.items():
-            serializable[attr] = {
-                'right': [(int(idx), val) for idx, val in samples.get('right', [])],
-                'wrong': [(int(idx), val) for idx, val in samples.get('wrong', [])]
-            }
-        json.dump(serializable, f, ensure_ascii=False, indent=2)
-    
-    with open(os.path.join(save_path, 'mid_confidence_samples.json'), 'w', encoding='utf-8') as f:
-        serializable = {}
-        for attr, samples in mid_conf_dict.items():
-            serializable[attr] = {
-                'right': [(int(idx), val) for idx, val in samples.get('right', [])],
-                'wrong': [(int(idx), val) for idx, val in samples.get('wrong', [])]
-            }
-        json.dump(serializable, f, ensure_ascii=False, indent=2)
-
-
-def compute_f1_score_for_iteration(model_col, dirty_csv, clean_csv, all_attrs, related_attrs_dict, 
-                                    funcs_for_attr, feature_all_dict, resp_path, logger, canonical_patterns_dict=None):
-    """
-    使用当前模型对整个脏数据进行预测并计算F1分数
-    
-    Returns:
-        precision, recall, f1_score, detected_errors, total_errors
-    """
-    det_wrong_list = []
-    
-    # 对每个属性进行预测
-    for col, attr in enumerate(all_attrs):
-        if attr not in model_col:
-            continue
-        
-        # 获取该列的标准模式（如果有）
-        attr_canonical_patterns = canonical_patterns_dict.get(attr, None) if canonical_patterns_dict else None
-        wrong_cells = make_predictions(
-            col, attr, dirty_csv, model_col, related_attrs_dict,
-            funcs_for_attr, feature_all_dict, resp_path,
-            canonical_patterns=attr_canonical_patterns
-        )
-        det_wrong_list.extend(wrong_cells)
-    
-    # 计算真实错误数
-    total_errors = 0
-    for attr in all_attrs:
-        for idx in range(len(dirty_csv)):
-            if str(dirty_csv.loc[idx, attr]) != str(clean_csv.loc[idx, attr]):
-                total_errors += 1
-    
-    # 计算真阳性（正确检测到的错误）
-    true_positives = 0
-    for idx, attr in det_wrong_list:
-        if str(dirty_csv.loc[idx, attr]) != str(clean_csv.loc[idx, attr]):
-            true_positives += 1
-    
-    detected_errors = len(det_wrong_list)
-    
-    # 计算精确率、召回率和F1分数
-    precision = true_positives / detected_errors if detected_errors > 0 else 0
-    recall = true_positives / total_errors if total_errors > 0 else 0
-    f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-    
-    logger.info(f"  检测到的错误数: {detected_errors}, 真实错误数: {total_errors}")
-    logger.info(f"  精确率: {precision:.4f}, 召回率: {recall:.4f}, F1分数: {f1_score:.4f}")
-    
-    return precision, recall, f1_score, detected_errors, total_errors
-
-
-# ==================== 原有函数（部分修改） ====================
-
-def llm_label_indices(attr_name, indices, dirty_csv, related_attrs_dict, 
+def llm_label_indices(attr_name, indices, dirty_csv, clean_csv, related_attrs_dict, 
                       high_confidence_right_dict, high_confidence_wrong_dict,
                       error_checking_res_directory, err_check_val_num_per_query=20,
                       canonical_patterns=None):
@@ -1062,7 +1049,57 @@ def llm_label_indices(attr_name, indices, dirty_csv, related_attrs_dict,
             
             with open(os.path.join(error_checking_res_directory, f'error_checking_{attr_name}.txt'), 'a', encoding='utf-8') as f:
                 f.write(f"// indices: {sub_list_indices}\n")
-                f.write(response + '\n\n')
+                f.write(response + '\n')
+                
+                # 添加Ground Truth对比
+                f.write("\n// ========== Ground Truth Comparison ==========\n")
+                correct_count = 0
+                total_count = 0
+                
+                # 从response中提取LLM标注
+                llm_labels = {}
+                full_pattern = fr'"value_row":\s*(".*?"),\s*\n\s*"error_analysis":\s*"([^"]*)",\s*\n\s*"has_error_in_{attr_name}_value":\s*(true|false)'
+                for m in re.finditer(full_pattern, response, re.IGNORECASE):
+                    value_row = m.group(1)
+                    has_error = m.group(3).lower() == 'true'
+                    llm_labels[value_row] = 1 if has_error else 0
+                
+                for idx in sub_list_indices:
+                    dirty_val = str(dirty_csv.loc[idx, attr_name])
+                    clean_val = str(clean_csv.loc[idx, attr_name])
+                    is_actually_wrong = (dirty_val != clean_val)
+                    
+                    # 构造value_row用于匹配
+                    related_attrs_local = list(related_attrs_dict[attr_name])
+                    value_dict = {col: str(dirty_csv.loc[idx, col]) for col in [attr_name] + related_attrs_local}
+                    value_row_str = "{" + ",".join(f'"{k}":"{v}"' for k, v in value_dict.items()) + "}"
+                    
+                    # 尝试多种匹配方式
+                    llm_predicted_wrong = None
+                    for vr_key in llm_labels.keys():
+                        if attr_name in vr_key and dirty_val in vr_key:
+                            llm_predicted_wrong = llm_labels[vr_key]
+                            break
+                    
+                    if llm_predicted_wrong is None:
+                        llm_predicted_wrong = 0  # 默认预测为正确
+                    
+                    is_correct = (llm_predicted_wrong == 1 and is_actually_wrong) or (llm_predicted_wrong == 0 and not is_actually_wrong)
+                    if is_correct:
+                        correct_count += 1
+                    total_count += 1
+                    
+                    status = "✓ CORRECT" if is_correct else "✗ WRONG"
+                    f.write(f"  idx={idx}: {status}\n")
+                    f.write(f"    Dirty Value:  '{dirty_val}'\n")
+                    f.write(f"    Clean Value:  '{clean_val}'\n")
+                    f.write(f"    Actually Wrong: {is_actually_wrong}\n")
+                    f.write(f"    LLM Predicted Wrong: {llm_predicted_wrong == 1}\n")
+                    f.write("\n")
+                
+                accuracy = correct_count / total_count if total_count > 0 else 0
+                f.write(f"// Batch Accuracy: {correct_count}/{total_count} = {accuracy:.4f}\n")
+                f.write("="*80 + "\n\n")
             
             all_responses.append((response, sub_list_indices))
             
@@ -1162,136 +1199,7 @@ def extract_func(text_content):
     return clean_func_list, dirty_func_list
 
 
-def gen_dirty_funcs(attr, clean_info, errs_info, api_use, model_type):
-    dirty_str = "\n"
-    
-    # 确保clean_info是可迭代的列表
-    if clean_info is None:
-        clean_info = []
-    if not isinstance(clean_info, (list, tuple)):
-        clean_info = [clean_info]
-    clean_info_str = '\n'.join([str(i) for i in clean_info if i is not None])
-    
-    # 确保errs_info是可迭代的列表
-    if errs_info is None:
-        errs_info = []
-    if not isinstance(errs_info, (list, tuple)):
-        errs_info = [errs_info]
-    
-    try:
-        dirty_str = dirty_str + '\n'.join([str(i) for i in errs_info if i is not None])
-    except Exception as e:
-        print(f"Error: {e}\n When handling {errs_info}\n")
-        dirty_str = dirty_str + str(errs_info) + "\n"
-    
-    func_gen_prompt = err_clean_func_prompt(attr, clean_info_str, dirty_str)
-    llm_gen_func = get_ans_from_llm(func_gen_prompt, api_use=api_use, model_type=model_type)
-    
-    # 确保llm_gen_func是字符串
-    if llm_gen_func is None:
-        llm_gen_func = ""
-    
-    temp_clean_flist, dirty_flist = extract_func(llm_gen_func)
-    return temp_clean_flist, dirty_flist, func_gen_prompt, llm_gen_func
-
-
-def subtask_func_gen(attr_name, err_list, func_file_num, right_values_list, funcs_directory, api_use, model_type):
-    temp_clean_flist, dirty_flist, func_gen_prompt, llm_gen_func = gen_dirty_funcs(attr_name, right_values_list, err_list, api_use, model_type)
-    funcs_for_attr = defaultdict(default_dict_of_lists)
-    funcs_for_attr[attr_name]['clean'].extend(list(set(temp_clean_flist)))
-    funcs_for_attr[attr_name]['dirty'].extend(list(set(dirty_flist)))
-    with open(os.path.join(funcs_directory, f"prompt_funcs_zgen_{attr_name}{func_file_num}.txt"), 'w', encoding='utf-8') as prom_file:
-        prom_file.write(func_gen_prompt)
-    with open(os.path.join(funcs_directory, f"funcs_zgen_{attr_name}{func_file_num}.txt"), 'w', encoding='utf-8') as func_file:
-        func_file.write("\n".join(list(set(temp_clean_flist))))
-    return attr_name, funcs_for_attr
-
-
-def gen_err_funcs(attr, high_confidence_right_dict, high_confidence_wrong_dict, dirty_csv, related_attrs_dict, funcs_directory, api_use, model_type):
-    """根据高置信度样本生成错误检测函数"""
-    related_attrs = list(related_attrs_dict[attr])
-    
-    wrong_values = []
-    right_values = []
-    
-    # 从高置信度字典获取数据，确保数据有效
-    if attr in high_confidence_wrong_dict:
-        wrong_values = [v for v in high_confidence_wrong_dict[attr] if v is not None]
-    if attr in high_confidence_right_dict:
-        right_values = [v for v in high_confidence_right_dict[attr] if v is not None]
-    
-    # 将值转换为字符串，处理可能的异常
-    filtered_error = []
-    for vals in wrong_values:
-        try:
-            filtered_error.append(str(vals))
-        except Exception as e:
-            print(f"Warning: Cannot convert value to string: {e}")
-            continue
-    
-    if len(filtered_error) == 0:
-        return False
-    
-    max_err_num = 20
-    if max_err_num > (int(len(filtered_error)/2)+1):
-        max_err_num = int(len(filtered_error)/2)+1
-    filtered_error_sublists = split_list_to_sublists(filtered_error, max_err_num)
-    if len(filtered_error_sublists) > 2:
-        filtered_error_sublists = filtered_error_sublists[:2]
-    
-    funcs_for_attr = {}
-    max_err_num = min(max_err_num, len(right_values)) if right_values else 1
-    
-    with ThreadPoolExecutor(max_workers=2*os.cpu_count()) as a_executor:
-        a_results = []
-        for temp_idx in range(len(filtered_error_sublists)):
-            sample_right = random.sample(right_values, min(max_err_num, len(right_values))) if right_values else []
-            a_results.append(a_executor.submit(
-                subtask_func_gen, attr, filtered_error_sublists[temp_idx], 
-                temp_idx, sample_right, funcs_directory, api_use, model_type
-            ))
-        for a_future in as_completed(a_results):
-            attr_name, funcs_for_attr_gen = a_future.result()
-            funcs_for_attr.update(funcs_for_attr_gen)
-    
-    func_extract_file = open(os.path.join(funcs_directory, f"funcs_zgen_{attr}.txt"), 'w', encoding='utf-8')
-    if attr in funcs_for_attr:
-        temp_clean_flist_str = "\n".join(funcs_for_attr[attr]['clean'])
-        func_extract_file.write(temp_clean_flist_str)
-    func_extract_file.close()
-    return funcs_for_attr
-
-
-def execute_func(function_code, val, attr):
-    local_scope = {}
-    exec(function_code, globals(), local_scope)
-    function_name = list(local_scope.keys())[0]
-    function = local_scope[function_name]
-    return function(val, attr)
-
-
 funcs_with_errors = set()
-
-def handle_func_exec(func, val, attr):
-    try:
-        result = execute_func(func, val, attr)
-    except Exception as err:
-        func_str = f"Error: {err}\n" + f"Value: {val}, Attribute: {attr}\nFunc: {func}\n"
-        funcs_with_errors.add(func_str)
-        return -1
-    return 1 if result else 0
-
-
-def task_func_gen(attr_name, high_confidence_right_dict, high_confidence_wrong_dict, dirty_csv, related_attrs_dict, 
-                  funcs_directory, para_file, api_use, model_type):
-    funcs_for_attr = gen_err_funcs(attr_name, high_confidence_right_dict, high_confidence_wrong_dict, dirty_csv, related_attrs_dict, 
-                                    funcs_directory, api_use, model_type)
-    if funcs_for_attr:
-        para_file.write(f"{attr_name} func_num:{len(funcs_for_attr.get(attr_name, {}).get('clean', []))}\n")
-        return funcs_for_attr
-    else:
-        return {attr_name: {'clean': [], 'dirty': []}}
-
 
 def fix_error_flags(response_str):
     lines = response_str.splitlines()
@@ -1312,6 +1220,136 @@ def normalize_string(s):
                .replace(", ", ",")
                .replace(": ", ":")
                .replace("'", '"'))
+
+
+# 简化版的特征生成函数（不使用预函数和函数特征）
+
+def process_attr_train_feat_simplified(attr, dirty_csv, train_data_dict, related_attrs_dict, 
+                                       resp_path, canonical_patterns=None):
+    """
+    处理属性的训练特征（简化版，不使用函数特征）
+    
+    特征包括：
+    1. FastText词向量
+    2. 标准模式相似度（如果有）
+    """
+    fasttext_model = fasttext.load_model('./cc.en.300.bin')
+    fasttext_dimension = len(dirty_csv.columns)
+    fasttext.util.reduce_model(fasttext_model, fasttext_dimension)
+    
+    feature_list = []
+    label_list = []
+    related_attrs = list(related_attrs_dict[attr])
+    
+    # 从train_data_dict获取训练数据
+    right_samples = train_data_dict.get(attr, {}).get('right', [])
+    wrong_samples = train_data_dict.get(attr, {}).get('wrong', [])
+    
+    for idx, val in tqdm(right_samples, ncols=120, desc=f"Processing {attr} right values"):
+        feature = single_val_feat_simplified(val, fasttext_model, attr, 
+                                            list(dirty_csv.columns), canonical_patterns)
+        if feature:
+            feature_list.append(feature)
+            label_list.append(0)
+    
+    for idx, val in tqdm(wrong_samples, ncols=120, desc=f"Processing {attr} wrong values"):
+        feature = single_val_feat_simplified(val, fasttext_model, attr, 
+                                            list(dirty_csv.columns), canonical_patterns)
+        if feature:
+            feature_list.append(feature)
+            label_list.append(1)
+    
+    return attr, feature_list, label_list
+
+
+def single_val_feat_simplified(val, fasttext_m, attr, all_attrs, canonical_patterns=None):
+    """
+    简化版的单值特征生成（不使用函数特征）
+    
+    特征包括：
+    1. FastText词向量
+    2. 标准模式相似度（如果有）
+    """
+    feature = []
+    
+    # 1. FastText词向量特征
+    if fasttext_m is not None:
+        if isinstance(val, dict):
+            for a_val in val.values():
+                feature.extend(fasttext_m.get_word_vector(str(a_val)))
+        else:
+            for a_val in val:
+                feature.extend(fasttext_m.get_word_vector(str(a_val)))
+    
+    # 2. 添加标准模式相似度特征（如果有）
+    if canonical_patterns and len(canonical_patterns) > 0:
+        # 获取当前列的值
+        if isinstance(val, dict):
+            attr_val = val.get(attr, '')
+        else:
+            attr_val = str(val)
+        pattern_sim, _ = calculate_pattern_similarity_feature(attr_val, canonical_patterns)
+        feature.append(pattern_sim)
+    
+    return feature
+
+def calculate_llm_consistency(label_history):
+    """
+    计算LLM标注一致性分数
+    
+    Args:
+        label_history: 标签历史列表 [label1, label2, ...]
+    
+    Returns:
+        consistency_score: 一致性分数 (0-1)
+        majority_label: 多数标签
+    """
+    if not label_history or len(label_history) == 0:
+        return 0.0, 0
+    
+    counter = Counter(label_history)
+    majority_label, majority_count = counter.most_common(1)[0]
+    consistency_score = majority_count / len(label_history)
+    
+    return consistency_score, majority_label
+
+def make_predictions_simplified(col, attr, dirty_csv, model_col, related_attrs_dict, 
+                                resp_path, canonical_patterns=None):
+    """
+    简化版的预测函数（不使用函数特征）
+    """
+    if attr not in model_col.keys():
+        return []
+    
+    model = model_col[attr]
+    related_attrs = list(related_attrs_dict[attr])
+    columns = list(dirty_csv.columns)
+    
+    # 加载FastText模型
+    fasttext_model = fasttext.load_model('./cc.en.300.bin')
+    fasttext_dimension = len(columns)
+    fasttext.util.reduce_model(fasttext_model, fasttext_dimension)
+    
+    # 生成特征
+    feature_list = []
+    for idx in range(len(dirty_csv)):
+        cell_val = dirty_csv.loc[idx, [attr]+related_attrs].to_dict()
+        feature = single_val_feat_simplified(cell_val, fasttext_model, attr, 
+                                            columns, canonical_patterns)
+        feature_list.append(feature)
+    
+    # 预测
+    test_feat_np = np.array(feature_list)
+    pred_prob_list = model.predict(test_feat_np)
+    
+    wrong_cells = []
+    for idx in range(len(dirty_csv)):
+        pred_prob = pred_prob_list[idx]
+        if pred_prob == 1:
+            wrong_cells.append((idx, attr))
+    
+    return wrong_cells
+
 
 
 def process_attr_train_feat(attr, dirty_csv, train_data_dict, related_attrs_dict, 
@@ -1575,244 +1613,6 @@ def calculate_ksd(sample1, sample2):
     return ks_statistic
 
 
-def process_select_optimal_cluster(
-    train_data_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict,
-    pre_funcs_for_attr, resp_path, logger, residual_method='both',
-    previously_selected_clusters=None, cluster_selection_window=-1
-):
-    """
-    从聚类结果中选出最优聚类，返回indices_dict格式
-    
-    Args:
-        train_data_dict: 训练数据字典 {attr: {'right': [...], 'wrong': [...]}}
-        cluster_index_dict: 聚类索引字典
-        dirty_csv: 脏数据DataFrame
-        all_attrs: 所有属性列表
-        related_attrs_dict: 相关属性字典
-        pre_funcs_for_attr: 预处理函数字典
-        resp_path: 响应路径
-        logger: 日志记录器
-        index_value_label_history: 历史标注 {attr: {idx: [labels]}}
-        residual_method: 残差计算方法
-        previously_selected_clusters: 之前选择过的聚类 {attr: [cluster_idx1, cluster_idx2, ...]}
-        cluster_selection_window: 聚类选择窗口大小
-            -1: 不能选择任何选择过的聚类（默认行为）
-            1: 不能选择上一次选择的聚类
-            2: 不能选择前两次选择的聚类
-            以此类推
-    
-    Returns:
-        indices_dict: {attr: [idx1, idx2, ...]} 最优聚类的索引
-    """
-    optimal_cluster_info_dict = {}
-    
-    if previously_selected_clusters is None:
-        previously_selected_clusters = {}
-    
-    logger.info(f"开始选择最优聚类... (窗口大小: {cluster_selection_window}")
-    
-    try:
-        fasttext_model = fasttext.load_model('./cc.en.300.bin')
-        fasttext_dimension = len(related_attrs_dict[next(iter(related_attrs_dict))]) + 1
-        fasttext.util.reduce_model(fasttext_model, fasttext_dimension)
-    except Exception as e:
-        logger.error(f"加载FastText模型失败: {str(e)}")
-        return {}
-
-    global_cache = feat_gen_global_cache(dirty_csv, related_attrs_dict)
-
-    def process_attr(attr):
-        min_residual = float('inf')
-        attr_optimal_cluster = None
-        
-        logger.info(f"处理属性: {attr}")
-        
-        if attr not in cluster_index_dict:
-            logger.warning(f"属性 {attr} 不在聚类索引字典中，跳过")
-            return None
-            
-        clusters = cluster_index_dict[attr]
-        if len(clusters) == 0:
-            logger.warning(f"属性 {attr} 没有有效聚类，跳过")
-            return None
-            
-        related_attrs = list(related_attrs_dict[attr])
-        col_num = list(dirty_csv.columns).index(attr)
-
-        ref_data = dirty_csv.loc[:, [attr] + related_attrs]
-        ref_df = pd.DataFrame(ref_data) if not ref_data.empty else pd.DataFrame()
-        col_num = list(ref_df.columns).index(attr)
-        ref_features, _, scaler = feat_gen_df_incremental(ref_df, col_num, attr, pre_funcs_for_attr, resp_path, global_cache)
-        ref_features = np.array(ref_features, dtype=np.float64)
-        ref_features = np.nan_to_num(ref_features)
-
-        attr_previously_selected = previously_selected_clusters.get(attr, [])
-        
-        # 根据窗口大小确定需要排除的聚类
-        excluded_clusters = set()
-        if cluster_selection_window == -1:
-            # -1 表示不能选择任何选择过的聚类
-            excluded_clusters = set(attr_previously_selected)
-        elif cluster_selection_window > 0:
-            # 只排除最近 window_size 次选择的聚类
-            excluded_clusters = set(attr_previously_selected[-cluster_selection_window:])
-        # 如果 window_size == 0，不排除任何聚类
-        
-        for cluster_idx, cluster_indices in enumerate(clusters[1:], start=0):
-            if cluster_idx in excluded_clusters:
-                logger.info(f"跳过属性 {attr} 的聚类 {cluster_idx}，因为在窗口范围内已经选择过")
-                continue
-                
-            if len(cluster_indices) == 0:
-                continue
-                
-            cluster_data = dirty_csv.loc[cluster_indices, [attr] + related_attrs]
-            
-            # 合并训练数据
-            train_data = []
-            if attr in train_data_dict:
-                for idx, val in train_data_dict[attr].get('right', []):
-                    if idx not in cluster_indices:
-                        train_data.append(val)
-                for idx, val in train_data_dict[attr].get('wrong', []):
-                    if idx not in cluster_indices:
-                        train_data.append(val)
-            train_df = pd.DataFrame(train_data) if train_data else pd.DataFrame()
-            
-            combined_data = pd.concat([cluster_data, train_df], ignore_index=True)
-            if combined_data.empty:
-                continue
-
-            combined_feature_list, _, _ = feat_gen_df_incremental(
-                combined_data, col_num, attr, pre_funcs_for_attr, resp_path, global_cache, scaler
-            )
-            combined_feature_list = np.nan_to_num(combined_feature_list)
-            
-            try:
-                if residual_method in ['jsd', 'both']:
-                    hist_comb, _ = np.histogram(combined_feature_list.flatten(), bins=30, density=True)
-                    hist_ref, _ = np.histogram(ref_features.flatten(), bins=30, density=True)
-                    jsd_residual = calculate_jsd(hist_comb, hist_ref)
-                else:
-                    jsd_residual = float('inf')
-
-                if residual_method in ['ksd', 'both']:
-                    if combined_feature_list.ndim > 1:
-                        mean_comb = np.mean(combined_feature_list, axis=1)
-                    else:
-                        mean_comb = combined_feature_list
-                    
-                    if ref_features.ndim > 1:
-                        mean_ref = np.mean(ref_features, axis=1)
-                    else:
-                        mean_ref = ref_features
-                    
-                    ksd_residual = calculate_ksd(mean_comb, mean_ref)
-                else:
-                    ksd_residual = float('inf')
-
-                if residual_method == 'both':
-                    combined_residual = 0.5 * jsd_residual + 0.5 * ksd_residual
-                elif residual_method == 'jsd':
-                    combined_residual = jsd_residual
-                else:
-                    combined_residual = ksd_residual
-
-                logger.info(f"{attr} 聚类 {cluster_idx}: JSD={jsd_residual:.4f}, KSD={ksd_residual:.4f}, 综合={combined_residual:.4f}")
-
-                if combined_residual < min_residual:
-                    min_residual = combined_residual
-                    attr_optimal_cluster = {
-                        'cluster_idx': cluster_idx,
-                        'cluster_indices': cluster_indices,
-                        'jsd_residual': jsd_residual,
-                        'ksd_residual': ksd_residual,
-                        'combined_residual': combined_residual
-                    }
-
-            except Exception as e:
-                logger.error(f"计算属性 {attr} 聚类 {cluster_idx} 残差时出错: {str(e)}")
-                continue
-
-        return attr, attr_optimal_cluster
-
-    for attr in all_attrs:
-        result = process_attr(attr)
-        if result:
-            attr, attr_optimal_cluster = result
-            if attr_optimal_cluster is not None:
-                optimal_cluster_info_dict[attr] = attr_optimal_cluster
-
-    # 转换为indices_dict格式
-    indices_dict = get_indices_from_optimal_cluster(optimal_cluster_info_dict)
-    
-    if optimal_cluster_info_dict:
-        logger.info("最优聚类信息:")
-        for attr, cluster_info in optimal_cluster_info_dict.items():
-            logger.info(f"属性 {attr} 聚类 {cluster_info['cluster_idx']}，综合残差 {cluster_info['combined_residual']:.4f}")
-    else:
-        logger.warning("未找到有效的最优聚类")
-    
-    return indices_dict
-
-
-def measure_llm_label(resp_path, clean_csv, all_attrs, related_attrs_dict, gt_wrong_dict, final_labels):
-    """
-    评估LLM标注结果
-    
-    Args:
-        final_labels: {attr: [(idx, value, label), ...]} 最终标签
-    """
-    llm_label_eval_file = open(os.path.join(resp_path, 'llm_label_results.txt'), 'w', encoding='utf-8')
-    overall_wrong_label_num = 0
-    overall_lwrong_num = 0
-    overall_lright_num = 0
-    overall_miss_wrong_num = 0
-    
-    for attr in all_attrs:
-        llm_label_eval_file.write('\n' + '*'*30 + attr + '*'*30 + '\n\n')
-        wrongly_llm_det = []
-        missing_llm_det = []
-        llm_wrong_label_num = 0
-        llm_lwrong_num = 0
-        llm_lright_num = 0
-        llm_miss_wrong_num = 0
-        
-        for idx, llm_lstr, llm_label in final_labels.get(attr, []):
-            if llm_label == 1:
-                llm_lwrong_num += 1
-                overall_lwrong_num += 1
-                if str(llm_lstr) not in gt_wrong_dict[attr]:
-                    llm_wrong_label_num += 1
-                    overall_wrong_label_num += 1
-                    wrongly_llm_det.append((idx, str(llm_lstr)))
-            elif llm_label == 0:
-                llm_lright_num += 1
-                overall_lright_num += 1
-                if str(llm_lstr) in gt_wrong_dict[attr]:
-                    llm_miss_wrong_num += 1
-                    overall_miss_wrong_num += 1
-                    missing_llm_det.append((idx, str(llm_lstr)))
-        
-        llm_label_eval_file.write(f"Wrong data labeling accuracy: {1-llm_wrong_label_num/(llm_lwrong_num+1e-6)} ({llm_lwrong_num-llm_wrong_label_num}/{llm_lwrong_num})\n")
-        llm_label_eval_file.write(f"Right data labeling accuracy: {1-llm_miss_wrong_num/(llm_lright_num+1e-6)} ({llm_lright_num-llm_miss_wrong_num}/{llm_lright_num})\n\n")
-        llm_label_eval_file.write('-'*30 + "Wrongly Detected Values" + '-'*30 + '\n\n')
-        for idx, llm_lstr in wrongly_llm_det:
-            llm_label_eval_file.write('\nDirty: ' + llm_lstr)
-            llm_label_eval_file.write('\nClean: ' + str(clean_csv.loc[int(idx), [attr] + list(related_attrs_dict[attr])].to_dict()) + '\n')
-                
-        llm_label_eval_file.write('\n' + '-'*30 + "Missing Erroneous Values" + '-'*30 + '\n\n')
-        for idx, llm_lstr in missing_llm_det:
-            llm_label_eval_file.write('\nDirty: ' + llm_lstr)
-            llm_label_eval_file.write('\nClean: ' + str(clean_csv.loc[int(idx), [attr] + list(related_attrs_dict[attr])].to_dict()) + '\n\n')
-
-    llm_label_eval_file.write('*'*30 + "Overall Evaluation" + '*'*30 + '\n\n')
-    llm_label_eval_file.write(f"Overall Wrong data labeling accuracy: {1-overall_wrong_label_num/(overall_lwrong_num+1e-6)} ({overall_lwrong_num-overall_wrong_label_num}/{overall_lwrong_num})\n")
-    llm_label_eval_file.write(f"Overall Right data labeling accuracy: {1-overall_miss_wrong_num/(overall_lright_num+1e-6)} ({overall_lright_num-overall_miss_wrong_num}/{overall_lright_num})\n\n")
-    llm_label_eval_file.close()
-    return 'Done'
-
-
 def err_pat_in_text_attr(attr):
     pattern = fr'"value_row":\s*(".*?"),\s*\n\s*"error_analysis":\s*"[^"]*",\s*\n\s*"has_error_in_{attr}_value":\s*true'
     return pattern
@@ -1832,40 +1632,65 @@ def save_label_dict(index_value_label_dict, save_path):
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
-def compare_llm_and_classifier_labels(index_value_label_history, det_wrong_list_res, dirty_csv, related_attrs_dict):
+def save_mlp_prediction_errors(dirty_csv, clean_csv, det_wrong_list_res, all_attrs, resp_path):
     """
-    比较LLM标注结果和分类器标注结果
+    保存MLP预测错误的值
     
-    Args:
-        index_value_label_history: {attr: {idx: [label1, label2, ...]}}
-        det_wrong_list_res: [(idx, attr), ...]
-    
-    Returns:
-        comparison_results: {attr: {idx: {'llm_label': label, 'mlp_label': label, 'consistent': bool}}}
+    包括：
+    1. False Positives: 预测为错误但实际正确
+    2. False Negatives: 预测为正确但实际错误
     """
-    comparison_results = defaultdict(dict)
+    mlp_errors_file = os.path.join(resp_path, 'mlp_prediction_errors.txt')
     
-    classifier_labels = {}
-    for idx, attr in det_wrong_list_res:
-        classifier_labels[(idx, attr)] = 1
+    with open(mlp_errors_file, 'w', encoding='utf-8') as f:
+        f.write("="*80 + "\n")
+        f.write("MLP PREDICTION ERRORS ANALYSIS\n")
+        f.write("="*80 + "\n\n")
+        
+        # False Positives: 预测错误但实际正确
+        f.write("1. FALSE POSITIVES (Predicted as Error but Actually Clean):\n")
+        f.write("-"*80 + "\n")
+        fp_count = 0
+        for idx, attr in det_wrong_list_res:
+            dirty_val = str(dirty_csv.loc[idx, attr])
+            clean_val = str(clean_csv.loc[idx, attr])
+            if dirty_val == clean_val:
+                fp_count += 1
+                f.write(f"  Row {idx}, Column '{attr}':\n")
+                f.write(f"    Dirty Value:  '{dirty_val}'\n")
+                f.write(f"    Clean Value:  '{clean_val}'\n")
+                f.write(f"    Status: Same (False Positive)\n\n")
+        
+        f.write(f"Total False Positives: {fp_count}\n\n")
+        
+        # False Negatives: 预测正确但实际错误
+        f.write("2. FALSE NEGATIVES (Predicted as Clean but Actually Error):\n")
+        f.write("-"*80 + "\n")
+        fn_count = 0
+        detected_set = set(det_wrong_list_res)
+        
+        for attr in all_attrs:
+            for idx in range(len(dirty_csv)):
+                dirty_val = str(dirty_csv.loc[idx, attr])
+                clean_val = str(clean_csv.loc[idx, attr])
+                if dirty_val != clean_val and (idx, attr) not in detected_set:
+                    fn_count += 1
+                    f.write(f"  Row {idx}, Column '{attr}':\n")
+                    f.write(f"    Dirty Value:  '{dirty_val}'\n")
+                    f.write(f"    Clean Value:  '{clean_val}'\n")
+                    f.write(f"    Status: Different (False Negative)\n\n")
+        
+        f.write(f"Total False Negatives: {fn_count}\n\n")
+        
+        # 统计信息
+        f.write("="*80 + "\n")
+        f.write("SUMMARY:\n")
+        f.write(f"  False Positives: {fp_count}\n")
+        f.write(f"  False Negatives: {fn_count}\n")
+        f.write(f"  Total Prediction Errors: {fp_count + fn_count}\n")
+        f.write("="*80 + "\n")
     
-    for attr, idx_labels in index_value_label_history.items():
-        related_attrs = list(related_attrs_dict[attr])
-        for idx, label_list in idx_labels.items():
-            if not label_list:
-                continue
-            
-            _, llm_majority_label = calculate_llm_consistency(label_list)
-            mlp_label = classifier_labels.get((idx, attr), 0)
-            
-            comparison_results[attr][idx] = {
-                'llm_label': llm_majority_label,
-                'mlp_label': mlp_label,
-                'consistent': llm_majority_label == mlp_label,
-                'value': dirty_csv.loc[idx, [attr] + related_attrs].to_dict()
-            }
-    
-    return comparison_results
+    return mlp_errors_file
 
 
 def print_prediction_errors(dirty_csv, clean_csv, det_wrong_list_res, all_attrs, related_attrs_dict, logger, resp_path):
@@ -1905,116 +1730,6 @@ def print_prediction_errors(dirty_csv, clean_csv, det_wrong_list_res, all_attrs,
         f.write(f"F1分数: {f1_score:.4f}\n")
     
     logger.info(f"详细错误信息已保存到: {error_detail_file}")
-
-
-def label_prop(resp_path, dirty_path, clean_path, cluster_index_dict, final_labels, label_prop_flag=True):
-    """根据标注结果在聚类内扩散标签"""
-    det_wrong_list = []
-    det_right_list = []
-    
-    for attr, label_list in final_labels.items():
-        for idx, value, label in label_list:
-            if label == 1:
-                det_wrong_list.append((idx, attr))
-            elif label == 0:
-                det_right_list.append((idx, attr))
-    
-    if not label_prop_flag:
-        return det_wrong_list, det_right_list
-    
-    for attr, clusters in cluster_index_dict.items():
-        center_indices = clusters[0]
-        
-        center_labels = {}
-        for idx, value, label in final_labels.get(attr, []):
-            if idx in center_indices:
-                center_labels[idx] = label
-        
-        for center_idx, center_label in center_labels.items():
-            target_cluster = None
-            for i in range(1, len(clusters)):
-                if center_idx in clusters[i]:
-                    target_cluster = clusters[i]
-                    break
-            
-            if target_cluster is not None:
-                labeled_indices = {idx for idx, _, _ in final_labels.get(attr, [])}
-                for idx in target_cluster:
-                    if idx not in labeled_indices:
-                        if center_label == 1:
-                            det_wrong_list.append((idx, attr))
-                        else:
-                            det_right_list.append((idx, attr))
-    
-    return det_wrong_list, det_right_list
-
-
-def process_gen_err_funcs(FUNC_USE, resp_path, funcs_directory, dirty_csv, all_attrs, 
-                          para_file, related_attrs_dict, high_confidence_right_dict, high_confidence_wrong_dict, api_use, model_type):
-    """生成错误检测函数"""
-    err_gen_dict = defaultdict(default_dict_of_lists)
-    funcs_for_attr = defaultdict(default_dict_of_lists)
-    
-    if FUNC_USE:
-        with ThreadPoolExecutor(max_workers=2*os.cpu_count()) as executor:
-            results = [executor.submit(task_func_gen, attr, high_confidence_right_dict, high_confidence_wrong_dict, dirty_csv, 
-                                       related_attrs_dict, funcs_directory, para_file, 
-                                       api_use, model_type) for attr in all_attrs]
-            outputs = [result.result() for result in results]
-            for output in outputs:
-                funcs_for_attr.update(output)
-    
-    return err_gen_dict, funcs_for_attr
-
-
-def process_gen_clean_funcs(PRE_FUNC_USE, funcs_pre_directory, dirty_csv, all_attrs, 
-                            related_attrs_dict, logger, api_use, model_type):
-    """生成预处理函数"""
-    pre_funcs_for_attr = defaultdict(default_dict_of_lists)
-    
-    if PRE_FUNC_USE:
-        with ThreadPoolExecutor(max_workers=2*os.cpu_count()) as executor:
-            results = [executor.submit(gen_clean_funcs, attr, dirty_csv, funcs_pre_directory, 
-                                       related_attrs_dict, logger, api_use, model_type) for attr in all_attrs]
-            outputs = [result.result() for result in results]
-            for output in outputs:
-                pre_funcs_for_attr.update(output)
-    else:
-        for attr in all_attrs:
-            pre_funcs_for_attr[attr] = {'clean': []}
-    
-    return pre_funcs_for_attr
-
-
-def gen_clean_funcs(attr, dirty_csv, funcs_pre_directory, related_attrs_dict, logger, api_use, model_type):
-    """生成清洁函数"""
-    related_attrs = list(related_attrs_dict[attr])
-    sample_rows = []
-    total_rows = len(dirty_csv)
-    max_samp_num = 20
-    
-    if total_rows > 0:
-        sample_indices = random.sample(range(total_rows), min(max_samp_num, total_rows))
-        for idx in sample_indices:
-            row_dict = dirty_csv.loc[idx, [attr] + related_attrs].to_dict()
-            sample_rows.append(row_dict)
-    
-    sample_rows_str = '\n'.join([str(row) for row in sample_rows])
-    
-    if len(sample_rows) == 0:
-        logger.error("The Data is EMPTY!!!")
-        return {attr: {'clean': []}}
-    
-    prompt = pre_func_prompt(attr, sample_rows_str)
-    pre_func_response = get_ans_from_llm(prompt, api_use=api_use, model_type=model_type)
-    flist, _ = extract_func(pre_func_response)
-    
-    with open(os.path.join(funcs_pre_directory, f"prompt_pre_funcs_zgen_{attr}.txt"), 'w', encoding='utf-8') as prom_file:
-        prom_file.write(prompt)
-    with open(os.path.join(funcs_pre_directory, f"pre_funcs_zgen_{attr}.txt"), 'w', encoding='utf-8') as func_file:
-        func_file.write("\n".join(list(set(flist))))
-    
-    return {attr: {'clean': flist}}
 
 
 def load_config(config_path):
@@ -2100,6 +1815,10 @@ if __name__ == "__main__":
             total_time = 0
             time_start = time.time()
             
+# 这是简化后的主流程代码片段
+
+# 在 if __name__ == "__main__": 部分的主循环中
+
             # ==================== 步骤1: 计算相关属性 ====================
             related_attrs_dict, gt_wrong_dict = {}, {}
             with Timer('Getting Related Attributes', logger, time_file) as t:
@@ -2108,17 +1827,7 @@ if __name__ == "__main__":
                 )
             total_time += t.duration
 
-            # ==================== 步骤2: 预函数生成 ====================
-            pre_funcs_for_attr = {}
-            with Timer('Preliminary Function Generation', logger, time_file) as t:
-                pre_funcs_for_attr = process_gen_clean_funcs(
-                    PRE_FUNC_USE, funcs_pre_directory, dirty_csv, all_attrs, 
-                    related_attrs_dict, logger, API_USE, MODEL_TYPE
-                )
-            total_time += t.duration
-            
-            
-            # ==================== 步骤2.5: 分布分析（可选） ====================
+            # ==================== 步骤2: 分布分析（可选） ====================
             distribution_analysis_results = {}
             canonical_patterns_dict = {}
             use_distribution_analysis = {}
@@ -2137,7 +1846,7 @@ if __name__ == "__main__":
                 logger.info(f"使用分布分析的列: {dist_analysis_attrs}")
                 para_file.write(f"Distribution analysis enabled for: {dist_analysis_attrs}\n")
             else:
-                logger.info("分布分析方法未启用，使用原方法")
+                logger.info("分布分析方法未启用")
                 for attr in all_attrs:
                     use_distribution_analysis[attr] = False
             
@@ -2147,7 +1856,7 @@ if __name__ == "__main__":
             with Timer('Clustering', logger, time_file) as t:
                 cluster_index_dict, center_value_dict, feature_all_dict = process_cluster(
                     CLUSTER_RATE, dataset, resp_path, dirty_csv, all_attrs, 
-                    related_attrs_dict, pre_funcs_for_attr
+                    related_attrs_dict, {}  # 不使用预函数
                 )
             total_time += t.duration
             
@@ -2155,32 +1864,15 @@ if __name__ == "__main__":
             labeled_number = 0
             num_epochs = 5000
             
-            # 高置信度和中等置信度样本字典
+            # 高置信度样本字典
             high_confidence_right_dict = defaultdict(list)
             high_confidence_wrong_dict = defaultdict(list)
-            mid_confidence_right_dict = defaultdict(list)
-            mid_confidence_wrong_dict = defaultdict(list)
             
             # LLM标注历史: {attr: {idx: [label1, label2, ...]}}
             index_value_label_history = defaultdict(lambda: defaultdict(list))
             
-            # 模型预测历史: {attr: {idx: [proba1, proba2, ...]}}
-            model_prediction_history = defaultdict(lambda: defaultdict(list))
-            
             # 训练数据字典: {attr: {'right': [(idx, value)], 'wrong': [(idx, value)]}}
             train_data_dict = defaultdict(lambda: {'right': [], 'wrong': []})
-            
-            # 已选择的聚类记录
-            previously_selected_clusters = defaultdict(list)
-            
-            # 函数字典
-            funcs_for_attr = defaultdict(default_dict_of_lists)
-            
-            # 模型字典
-            model_col = {}
-            
-            # F1分数记录列表（如果启用每轮计算F1）
-            f1_scores_per_iteration = []
             
             # ==================== 步骤5: 初始LLM多轮标注 ====================
             # 第一次迭代使用聚类中心indices
@@ -2194,15 +1886,12 @@ if __name__ == "__main__":
                         if len(indices) == 0:
                             continue
                         
-                        # 调用LLM标注
-                        # 获取该列的标准模式（如果有）
-                        attr_canonical_patterns = canonical_patterns_dict.get(attr_name, None)
-                        
+                        # 调用LLM标注（不使用canonical_patterns作为上下文）
                         result = llm_label_indices(
-                            attr_name, indices, dirty_csv, related_attrs_dict,
+                            attr_name, indices, dirty_csv, clean_csv, related_attrs_dict,
                             high_confidence_right_dict, high_confidence_wrong_dict,
                             error_checking_res_directory, err_check_val_num_per_query,
-                            canonical_patterns=attr_canonical_patterns
+                            canonical_patterns=None  # 不作为上下文
                         )
                         
                         # 将结果累积到历史标注中
@@ -2212,9 +1901,38 @@ if __name__ == "__main__":
                     labeled_number += sum(len(indices) for indices in indices_dict.values())
             total_time += t.duration
             
-            # ==================== 步骤6: 根据一致性构建初始训练集 ====================
-            logger.info("根据LLM标注一致性构建初始训练集")
-            with Timer('Building Initial Training Set', logger, time_file) as t:
+            # 计算并保存每列的总体LLM标注准确率
+            logger.info("计算LLM标注总体准确率...")
+            for attr in all_attrs:
+                error_checking_file = os.path.join(error_checking_res_directory, f'error_checking_{attr}.txt')
+                if os.path.exists(error_checking_file):
+                    with open(error_checking_file, 'a', encoding='utf-8') as f:
+                        f.write("\n" + "="*80 + "\n")
+                        f.write(f"OVERALL ACCURACY SUMMARY FOR COLUMN: {attr}\n")
+                        f.write("="*80 + "\n")
+                        
+                        # 从文件中提取所有批次的准确率
+                        with open(error_checking_file, 'r', encoding='utf-8') as rf:
+                            file_content = rf.read()
+                            batch_accuracies = re.findall(r'// Batch Accuracy: (\d+)/(\d+) = ([\d.]+)', file_content)
+                            
+                            if batch_accuracies:
+                                total_correct = sum(int(match[0]) for match in batch_accuracies)
+                                total_samples = sum(int(match[1]) for match in batch_accuracies)
+                                overall_accuracy = total_correct / total_samples if total_samples > 0 else 0
+                                
+                                f.write(f"Total Batches: {len(batch_accuracies)}\n")
+                                f.write(f"Total Samples: {total_samples}\n")
+                                f.write(f"Total Correct: {total_correct}\n")
+                                f.write(f"Total Wrong: {total_samples - total_correct}\n")
+                                f.write(f"Overall Accuracy: {overall_accuracy:.4f} ({overall_accuracy*100:.2f}%)\n")
+                                f.write("="*80 + "\n")
+                                
+                                logger.info(f"列 '{attr}' LLM标注准确率: {overall_accuracy:.4f}")
+            
+            # ==================== 步骤6: 根据一致性构建训练集 ====================
+            logger.info("根据LLM标注一致性构建训练集")
+            with Timer('Building Training Set', logger, time_file) as t:
                 train_data_dict, final_labels = convert_label_history_to_train_data(
                     index_value_label_history, dirty_csv, related_attrs_dict,
                     INITIAL_LLM_LABEL_CONSISTENCY_THRESHOLD, all_attrs
@@ -2228,72 +1946,28 @@ if __name__ == "__main__":
                     total_train_samples += right_count + wrong_count
                     logger.info(f"属性 {attr}: 正确样本 {right_count}, 错误样本 {wrong_count}")
                 
-                logger.info(f"初始训练集总样本数: {total_train_samples}")
-                para_file.write(f"Initial training samples: {total_train_samples}\n")
-                
-                # 如果开启了result_analyze，保存初始训练集的详细信息
-                if RESULT_ANALYZE:
-                    train_change_dir = os.path.join(resp_path, 'train_set_changes')
-                    os.makedirs(train_change_dir, exist_ok=True)
-                    
-                    initial_train_data = {'phase': 'initial', 'data': {}}
-                    for attr in all_attrs:
-                        related_attrs = list(related_attrs_dict[attr])
-                        initial_train_data['data'][attr] = {'right': [], 'wrong': []}
-                        
-                        # 保存right样本及其LLM一致性分数
-                        for idx, value in train_data_dict[attr]['right']:
-                            label_history = index_value_label_history[attr].get(idx, [])
-                            consistency, majority_label = calculate_llm_consistency(label_history)
-                            majority_count = sum(1 for l in label_history if l == majority_label)
-                            total_count = len(label_history)
-                            initial_train_data['data'][attr]['right'].append({
-                                'idx': int(idx),
-                                'value': value,
-                                'llm_consistency': consistency,
-                                'consistency_formula': f"{majority_count}/{total_count}",
-                                'label_history': label_history
-                            })
-                        
-                        # 保存wrong样本及其LLM一致性分数
-                        for idx, value in train_data_dict[attr]['wrong']:
-                            label_history = index_value_label_history[attr].get(idx, [])
-                            consistency, majority_label = calculate_llm_consistency(label_history)
-                            majority_count = sum(1 for l in label_history if l == majority_label)
-                            total_count = len(label_history)
-                            initial_train_data['data'][attr]['wrong'].append({
-                                'idx': int(idx),
-                                'value': value,
-                                'llm_consistency': consistency,
-                                'consistency_formula': f"{majority_count}/{total_count}",
-                                'label_history': label_history
-                            })
-                    
-                    # 保存初始训练集
-                    initial_file = os.path.join(train_change_dir, 'initial_train_set.json')
-                    with open(initial_file, 'w', encoding='utf-8') as f:
-                        json.dump(initial_train_data, f, ensure_ascii=False, indent=2)
-                    logger.info(f"初始训练集详细信息已保存到: {initial_file}")
+                logger.info(f"训练集总样本数: {total_train_samples}")
+                para_file.write(f"Training samples: {total_train_samples}\n")
             total_time += t.duration
             
-            # ==================== 步骤7: 初始模型训练 ====================
-            logger.info("训练初始模型")
-            with Timer('Initial Model Training', logger, time_file) as t:
+            # ==================== 步骤7: 训练MLP模型 ====================
+            logger.info("训练MLP模型")
+            model_col = {}
+            with Timer('Model Training', logger, time_file) as t:
                 feat_dict_train = {}
                 label_dict_train = {}
                 
                 for attr in all_attrs:
                     # 获取该列的标准模式（如果有）
                     attr_canonical_patterns = canonical_patterns_dict.get(attr, None)
-                    attr_name, feature_list, label_list = process_attr_train_feat(
+                    attr_name, feature_list, label_list = process_attr_train_feat_simplified(
                         attr, dirty_csv, train_data_dict, related_attrs_dict,
-                        funcs_for_attr, feature_all_dict, resp_path,
-                        canonical_patterns=attr_canonical_patterns
+                        resp_path, canonical_patterns=attr_canonical_patterns
                     )
                     feat_dict_train[attr] = feature_list
                     label_dict_train[attr] = label_list
                 
-                for attr in tqdm(all_attrs, desc="Training initial models", ncols=120):
+                for attr in tqdm(all_attrs, desc="Training models", ncols=120):
                     attr_name, model, _, _, _, _ = train_model(
                         attr, feat_dict_train[attr], label_dict_train[attr], num_epochs
                     )
@@ -2303,609 +1977,25 @@ if __name__ == "__main__":
                 logger.info(f"成功训练 {len(model_col)} 个模型")
             total_time += t.duration
             
-            # 将训练集样本的标签作为第一次预测结果放入model_prediction_history
-            # 因为用这些样本训练的模型对它们的预测结果应该与标签一致
-            for attr in all_attrs:
-                # 正确样本（标签为0）的预测概率设为0.0
-                for idx, value in train_data_dict[attr]['right']:
-                    model_prediction_history[attr][idx].append(0.0)
-                # 错误样本（标签为1）的预测概率设为1.0
-                for idx, value in train_data_dict[attr]['wrong']:
-                    model_prediction_history[attr][idx].append(1.0)
-            
-            logger.info(f"已将训练集样本的标签作为初始预测结果加入预测历史")
-            
-            # ==================== 步骤8: 迭代优化 ====================
-            logger.info(f"开始迭代优化，共 {ITERATIONS} 轮")
-            
-            for iteration in range(ITERATIONS):
-                logger.info(f"\n{'='*50} 迭代 {iteration + 1}/{ITERATIONS} {'='*50}")
-                para_file.write(f"\n--- Iteration {iteration + 1} ---\n")
-                
-                # 初始化本轮迭代的训练集变化记录
-                if RESULT_ANALYZE:
-                    iteration_train_changes = defaultdict(dict)
-                
-                # ========== 8.1 选择最优聚类 ==========
-                with Timer(f'Iteration {iteration+1} - Select Optimal Cluster', logger, time_file) as t:
-                    indices_dict = process_select_optimal_cluster(
-                        train_data_dict, cluster_index_dict, dirty_csv, all_attrs, related_attrs_dict,
-                        pre_funcs_for_attr, resp_path, logger, 
-                        residual_method='both', previously_selected_clusters=previously_selected_clusters,
-                        cluster_selection_window=CLUSTER_SELECTION_WINDOW
-                    )
-                    
-                    # 记录已选择的聚类
-                    for attr, cluster_info in indices_dict.items():
-                        if attr in cluster_index_dict:
-                            for cluster_idx, cluster_indices in enumerate(cluster_index_dict[attr][1:]):
-                                if set(cluster_indices) == set(indices_dict.get(attr, [])):
-                                    previously_selected_clusters[attr].append(cluster_idx)
-                                    break
-                total_time += t.duration
-
-                # ========== 8.2 过滤已在训练集中的索引 ==========
-                # 过滤掉已经在训练集中的索引
-                filtered_indices_dict = {}
-                already_in_train = 0
-                
-                for attr, indices in indices_dict.items():
-                    train_indices = set()
-                    # 收集该属性在训练集中的所有索引
-                    for idx, _ in train_data_dict.get(attr, {}).get('right', []):
-                        train_indices.add(idx)
-                    for idx, _ in train_data_dict.get(attr, {}).get('wrong', []):
-                        train_indices.add(idx)
-                    
-                    # 过滤掉已在训练集中的索引
-                    unlabeled_indices = [idx for idx in indices if idx not in train_indices]
-                    filtered_indices_dict[attr] = unlabeled_indices
-                    already_in_train += len(indices) - len(unlabeled_indices)
-                
-                current_to_label = sum(len(indices) for indices in filtered_indices_dict.values())
-                logger.info(f"本轮需要标注的样本数: {current_to_label} (已过滤 {already_in_train} 个训练集中的样本)")
-                
-                if current_to_label == 0:
-                    logger.info("没有新的样本需要标注，跳过本轮")
-                    continue
-                
-                labeled_number += current_to_label
-                
-                # ========== 8.3 LLM标注新样本 ==========
-                with Timer(f'Iteration {iteration+1} - LLM Labeling', logger, time_file) as t:
-                    for attr_name, indices in filtered_indices_dict.items():
-                        if len(indices) == 0:
-                            continue
-                        
-                        # 获取该列的标准模式（如果有）
-                        attr_canonical_patterns = canonical_patterns_dict.get(attr_name, None)
-                        
-                        result = llm_label_indices(
-                            attr_name, indices, dirty_csv, related_attrs_dict,
-                            high_confidence_right_dict, high_confidence_wrong_dict,
-                            error_checking_res_directory, err_check_val_num_per_query,
-                            canonical_patterns=attr_canonical_patterns
-                        )
-                        
-                        # 累积到历史标注
-                        for idx, value, label in result.get(attr_name, []):
-                            index_value_label_history[attr_name][idx].append(label)
-                total_time += t.duration
-                
-                # ========== 8.4 模型预测并获取概率 ==========
-                with Timer(f'Iteration {iteration+1} - Model Prediction', logger, time_file) as t:
-                    det_wrong_list_res = []
-                    all_predictions = {}  # {attr: [(idx, attr, pred_label, pred_proba), ...]}
-                    
-                    for col, attr in enumerate(all_attrs):
-                        if attr not in model_col:
-                            continue
-                        
-                        # 获取该列的标准模式（如果有）
-                        attr_canonical_patterns = canonical_patterns_dict.get(attr, None)
-                        predictions = make_predictions_with_proba(
-                            col, attr, dirty_csv, model_col, related_attrs_dict,
-                            funcs_for_attr, feature_all_dict, resp_path,
-                            canonical_patterns=attr_canonical_patterns
-                        )
-                        all_predictions[attr] = predictions
-                        
-                        # 记录预测历史
-                        for idx, attr_name, pred_label, pred_proba in predictions:
-                            model_prediction_history[attr_name][idx].append(pred_proba)
-                            if pred_label == 1:
-                                det_wrong_list_res.append((idx, attr_name))
-                total_time += t.duration
-                
-                # ========== 8.5 计算置信度并更新训练集 ==========
-                with Timer(f'Iteration {iteration+1} - Confidence Calculation', logger, time_file) as t:
-                    alpha = 0.7
-                    beta = 1.2
-                    
-                    # 比较LLM和分类器标注
-                    comparison_results = compare_llm_and_classifier_labels(
-                        index_value_label_history, det_wrong_list_res, dirty_csv, related_attrs_dict
-                    )
-                    
-                    new_high_conf_samples = 0
-                    
-                    for attr in all_attrs:
-                        related_attrs = list(related_attrs_dict[attr])
-                        
-                        for idx in filtered_indices_dict.get(attr, []):
-                            # 改进的置信度计算公式：
-                            # 综合考虑分类器置信度、LLM一致性、标注次数和标注一致情况
-                            # 
-                            # 公式设计思路：
-                            # 1. 当MLP和LLM标注一致时：主要依赖分类器置信度和LLM一致性
-                            # 2. 当MLP和LLM标注不一致时：需要LLM标注次数足够多且一致性高才能信任
-                            # 
-                            # 统一公式：
-                            # Conf = w_cls * C_cls + w_llm * C_llm + w_agree * I_agree + w_count * C_count
-                            # 
-                            # 其中：
-                            # - C_cls = |p - 0.5| * 2  (分类器置信度，归一化到[0,1])
-                            # - C_llm = LLM一致性 (范围[0,1])
-                            # - I_agree = 1 if MLP和LLM一致 else 0
-                            # - C_count = min(标注次数/5, 1)  (标注次数归一化，5次为满分)
-                            # 
-                            # 权重设置：
-                            # - w_cls = 0.3  (分类器置信度权重)
-                            # - w_llm = 0.4  (LLM一致性权重，最重要)
-                            # - w_agree = 0.2  (标注一致性权重)
-                            # - w_count = 0.1  (标注次数权重)
-                            # 
-                            # 这样设计的好处：
-                            # 1. 当标注一致(I_agree=1)且分类器置信度高时，即使标注次数少也能达到阈值
-                            # 2. 当标注不一致(I_agree=0)时，需要LLM标注次数多(C_count高)且一致性高(C_llm高)才能补偿
-                            
-                            # 获取LLM标注历史
-                            label_history = index_value_label_history[attr].get(idx, [])
-                            llm_consistency, llm_majority_label = calculate_llm_consistency(label_history)
-                            llm_label_count = len(label_history)
-                            
-                            # 获取模型预测概率
-                            pred_proba = 0.5
-                            if attr in all_predictions:
-                                for pred_idx, pred_attr, pred_label, p in all_predictions[attr]:
-                                    if pred_idx == idx:
-                                        pred_proba = p
-                                        break
-                            
-                            # 判断MLP和LLM是否一致
-                            mlp_label = 1 if pred_proba >= 0.5 else 0
-                            is_agree = 1 if mlp_label == llm_majority_label else 0
-                            
-                            # 计算各个置信度分量
-                            classifier_confidence = abs(pred_proba - 0.5) * 2  # 归一化到[0,1]
-                            count_confidence = min(llm_label_count / 5.0, 1.0)  # 5次标注为满分
-                            
-                            # 权重参数
-                            w_cls = 0.1
-                            w_llm = 0.4
-                            w_agree = 0.2
-                            w_count = 0.3
-                            
-                            # 综合置信度计算
-                            confidence = (w_cls * classifier_confidence + 
-                                        w_llm * llm_consistency + 
-                                        w_agree * is_agree + 
-                                        w_count * count_confidence) # 0.7
-                            
-                            value = dirty_csv.loc[idx, [attr] + related_attrs].to_dict()
-                            
-                            # 根据置信度分类：高于高置信度阈值的加入训练数据
-                            if confidence >= TRAIN_HIGH_CONFIDENCE_THRESHOLD:
-                                # 构建置信度计算公式字符串
-                                conf_formula = f"{w_cls}*{classifier_confidence:.4f} + {w_llm}*{llm_consistency:.4f} + {w_agree}*{is_agree} + {w_count}*{count_confidence:.4f} = {confidence:.4f}"
-                                
-                                if llm_majority_label == 1:
-                                    if (idx, value) not in train_data_dict[attr]['wrong']:
-                                        train_data_dict[attr]['wrong'].append((idx, value))
-                                        new_high_conf_samples += 1
-                                        # 记录新加入的样本
-                                        if RESULT_ANALYZE:
-                                            if 'added_wrong' not in iteration_train_changes[attr]:
-                                                iteration_train_changes[attr]['added_wrong'] = []
-                                            iteration_train_changes[attr]['added_wrong'].append({
-                                                'idx': int(idx),
-                                                'value': value,
-                                                'confidence': confidence,
-                                                'confidence_formula': conf_formula,
-                                                'llm_consistency': llm_consistency,
-                                                'classifier_confidence': classifier_confidence,
-                                                'is_agree': is_agree,
-                                                'count_confidence': count_confidence
-                                            })
-                                else:
-                                    if (idx, value) not in train_data_dict[attr]['right']:
-                                        train_data_dict[attr]['right'].append((idx, value))
-                                        new_high_conf_samples += 1
-                                        # 记录新加入的样本
-                                        if RESULT_ANALYZE:
-                                            if 'added_right' not in iteration_train_changes[attr]:
-                                                iteration_train_changes[attr]['added_right'] = []
-                                            iteration_train_changes[attr]['added_right'].append({
-                                                'idx': int(idx),
-                                                'value': value,
-                                                'confidence': confidence,
-                                                'confidence_formula': conf_formula,
-                                                'llm_consistency': llm_consistency,
-                                                'classifier_confidence': classifier_confidence,
-                                                'is_agree': is_agree,
-                                                'count_confidence': count_confidence
-                                            })
-
-                    
-                    logger.info(f"新增高置信度样本: {new_high_conf_samples}")
-                    para_file.write(f"New high conf samples: {new_high_conf_samples}\n")
-                total_time += t.duration
-                
-                # ========== 8.6 重新训练模型 ==========
-                # 只有在训练数据增加时才重新训练模型
-                if new_high_conf_samples > 0:
-                    with Timer(f'Iteration {iteration+1} - Model Retraining', logger, time_file) as t:
-                        feat_dict_train = {}
-                        label_dict_train = {}
-                        
-                        for attr in all_attrs:
-                            # 获取该列的标准模式（如果有）
-                            attr_canonical_patterns = canonical_patterns_dict.get(attr, None)
-                            attr_name, feature_list, label_list = process_attr_train_feat(
-                                attr, dirty_csv, train_data_dict, related_attrs_dict,
-                                funcs_for_attr, feature_all_dict, resp_path,
-                                canonical_patterns=attr_canonical_patterns
-                            )
-                            feat_dict_train[attr] = feature_list
-                            label_dict_train[attr] = label_list
-                        
-                        for attr in tqdm(all_attrs, desc=f"Retraining models (iter {iteration+1})", ncols=120):
-                            attr_name, model, _, _, _, _ = train_model(
-                                attr, feat_dict_train[attr], label_dict_train[attr], num_epochs
-                            )
-                            if model is not None:
-                                model_col[attr] = model
-                    total_time += t.duration
-                
-                    # ========== 8.7 用新模型重新预测训练数据，计算稳定性置信度 ==========
-                    with Timer(f'Iteration {iteration+1} - Stability Confidence', logger, time_file) as t:
-                        alpha_stab = 0.7
-                        low_conf_removed = 0
-                        
-                        # 对训练数据中的每个样本重新预测
-                        for attr in all_attrs:
-                            if attr not in model_col:
-                                continue
-                            
-                            model = model_col[attr]
-                            related_attrs = list(related_attrs_dict[attr])
-                            
-                            # 收集需要移除的低置信度样本，同时将样本分类到高/中置信度词典
-                            samples_to_remove_right = []
-                            samples_to_remove_wrong = []
-                            
-                            # 检查right样本
-                            for idx, value in train_data_dict[attr]['right']:
-                                # 获取预测历史
-                                pred_history = model_prediction_history[attr].get(idx, [])
-                                
-                                if len(pred_history) >= 2:
-                                    stability = calculate_prediction_stability(pred_history)
-                                    current_proba = pred_history[-1] if pred_history else 0.5
-                                    
-                                    # 计算训练数据置信度
-                                    train_confidence = calculate_training_confidence(current_proba, stability, alpha_stab)
-                                    
-                                    # 构建train_confidence计算公式字符串
-                                    normalized_pred_conf = 2 * abs(current_proba - 0.5)
-                                    train_conf_formula = f"{alpha_stab}*2*|{current_proba:.4f}-0.5| + {1-alpha_stab}*{stability:.4f} = {alpha_stab}*{normalized_pred_conf:.4f} + {1-alpha_stab}*{stability:.4f} = {train_confidence:.4f}"
-                                    
-                                    # 根据置信度分类
-                                    if train_confidence < MID_CONFIDENCE_THRESHOLD:
-                                        # 低置信度样本移除
-                                        samples_to_remove_right.append((idx, value))
-                                        low_conf_removed += 1
-                                        # 记录移除的样本
-                                        if RESULT_ANALYZE:
-                                            if 'removed_right' not in iteration_train_changes[attr]:
-                                                iteration_train_changes[attr]['removed_right'] = []
-                                            iteration_train_changes[attr]['removed_right'].append({
-                                                'idx': int(idx),
-                                                'value': value,
-                                                'train_confidence': train_confidence,
-                                                'train_confidence_formula': train_conf_formula,
-                                                'stability': stability,
-                                                'current_proba': current_proba
-                                            })
-                                    elif train_confidence >= HIGH_CONFIDENCE_THRESHOLD:
-                                        # 高置信度样本加入高置信度词典（去重）
-                                        if value not in high_confidence_right_dict[attr]:
-                                            high_confidence_right_dict[attr].append(value)
-                                            # 记录新加入高置信度类的样本
-                                            if RESULT_ANALYZE:
-                                                if 'new_high_conf_right' not in iteration_train_changes[attr]:
-                                                    iteration_train_changes[attr]['new_high_conf_right'] = []
-                                                iteration_train_changes[attr]['new_high_conf_right'].append({
-                                                    'idx': int(idx),
-                                                    'value': value,
-                                                    'train_confidence': train_confidence,
-                                                    'train_confidence_formula': train_conf_formula,
-                                                    'stability': stability,
-                                                    'current_proba': current_proba
-                                                })
-                                    else:
-                                        # 中等置信度样本加入中置信度词典（去重）
-                                        if value not in mid_confidence_right_dict[attr]:
-                                            mid_confidence_right_dict[attr].append(value)
-                            
-                            # 检查wrong样本
-                            for idx, value in train_data_dict[attr]['wrong']:
-                                pred_history = model_prediction_history[attr].get(idx, [])
-                                
-                                if len(pred_history) >= 2:
-                                    stability = calculate_prediction_stability(pred_history)
-                                    current_proba = pred_history[-1] if pred_history else 0.5
-                                    
-                                    train_confidence = calculate_training_confidence(current_proba, stability, alpha_stab)
-                                    
-                                    # 构建train_confidence计算公式字符串
-                                    normalized_pred_conf = 2 * abs(current_proba - 0.5)
-                                    train_conf_formula = f"{alpha_stab}*2*|{current_proba:.4f}-0.5| + {1-alpha_stab}*{stability:.4f} = {alpha_stab}*{normalized_pred_conf:.4f} + {1-alpha_stab}*{stability:.4f} = {train_confidence:.4f}"
-                                    
-                                    # 根据置信度分类
-                                    if train_confidence < MID_CONFIDENCE_THRESHOLD:
-                                        # 低置信度样本移除
-                                        samples_to_remove_wrong.append((idx, value))
-                                        low_conf_removed += 1
-                                        # 记录移除的样本
-                                        if RESULT_ANALYZE:
-                                            if 'removed_wrong' not in iteration_train_changes[attr]:
-                                                iteration_train_changes[attr]['removed_wrong'] = []
-                                            iteration_train_changes[attr]['removed_wrong'].append({
-                                                'idx': int(idx),
-                                                'value': value,
-                                                'train_confidence': train_confidence,
-                                                'train_confidence_formula': train_conf_formula,
-                                                'stability': stability,
-                                                'current_proba': current_proba
-                                            })
-                                    elif train_confidence >= HIGH_CONFIDENCE_THRESHOLD:
-                                        # 高置信度样本加入高置信度词典（去重）
-                                        if value not in high_confidence_wrong_dict[attr]:
-                                            high_confidence_wrong_dict[attr].append(value)
-                                            # 记录新加入高置信度类的样本
-                                            if RESULT_ANALYZE:
-                                                if 'new_high_conf_wrong' not in iteration_train_changes[attr]:
-                                                    iteration_train_changes[attr]['new_high_conf_wrong'] = []
-                                                iteration_train_changes[attr]['new_high_conf_wrong'].append({
-                                                    'idx': int(idx),
-                                                    'value': value,
-                                                    'train_confidence': train_confidence,
-                                                    'train_confidence_formula': train_conf_formula,
-                                                    'stability': stability,
-                                                    'current_proba': current_proba
-                                                })
-                                    else:
-                                        # 中等置信度样本加入中置信度词典（去重）
-                                        if value not in mid_confidence_wrong_dict[attr]:
-                                            mid_confidence_wrong_dict[attr].append(value)
-                            
-                            # 移除低置信度样本
-                            for item in samples_to_remove_right:
-                                if item in train_data_dict[attr]['right']:
-                                    train_data_dict[attr]['right'].remove(item)
-                            
-                            for item in samples_to_remove_wrong:
-                                if item in train_data_dict[attr]['wrong']:
-                                    train_data_dict[attr]['wrong'].remove(item)
-                        
-                        logger.info(f"移除低置信度样本: {low_conf_removed}")
-                        para_file.write(f"Removed low conf samples: {low_conf_removed}\n")
-                else:
-                    logger.info("训练数据未增加，跳过该轮模型训练和预测")
-                total_time += t.duration
-                
-                # 统计当前训练集大小
-                current_train_size = sum(
-                    len(train_data_dict[attr]['right']) + len(train_data_dict[attr]['wrong'])
-                    for attr in all_attrs
-                )
-                logger.info(f"当前训练集大小: {current_train_size}")
-                para_file.write(f"Current training set size: {current_train_size}\n")
-
-                # 根据配置选择是否计算每轮的F1分数
-                if COMPUTE_F1_PER_ITERATION and len(model_col) > 0:
-                    logger.info(f"计算第 {iteration + 1} 轮的F1分数...")
-                    with Timer(f'Iteration {iteration+1} - Computing F1 Score', logger, time_file) as t:
-                        precision, recall, f1, detected, total = compute_f1_score_for_iteration(
-                            model_col, dirty_csv, clean_csv, all_attrs, related_attrs_dict,
-                            funcs_for_attr, feature_all_dict, resp_path, logger,
-                            canonical_patterns_dict=canonical_patterns_dict
-                        )
-                        
-                        # 记录F1分数
-                        f1_scores_per_iteration.append({
-                            'iteration': iteration + 1,
-                            'precision': precision,
-                            'recall': recall,
-                            'f1_score': f1,
-                            'detected_errors': detected,
-                            'total_errors': total,
-                            'train_set_size': current_train_size
-                        })
-                        
-                        para_file.write(f"Iteration {iteration + 1} F1: {f1:.4f} (P: {precision:.4f}, R: {recall:.4f})\n")
-                    total_time += t.duration
-                # 根据配置保存每轮的分析结果
-                if RESULT_ANALYZE:
-                    # 创建分析结果目录
-                    analyze_dir = os.path.join(resp_path, 'iteration_analysis')
-                    os.makedirs(analyze_dir, exist_ok=True)
-                    
-                    iteration_result = {
-                        'iteration': iteration + 1,
-                        'train_data': {},
-                        'misclassified_samples': []
-                    }
-                    
-                    # 保存当前轮次的训练数据
-                    for attr in all_attrs:
-                        iteration_result['train_data'][attr] = {
-                            'right': [(int(idx), val) for idx, val in train_data_dict[attr]['right']],
-                            'wrong': [(int(idx), val) for idx, val in train_data_dict[attr]['wrong']]
-                        }
-                    
-                    # 找出分类器错误分类的样本（误报和漏报）
-                    for attr in all_attrs:
-                        if attr not in model_col:
-                            continue
-                        
-                        related_attrs = list(related_attrs_dict[attr])
-                        
-                        # 检查预测结果中的误报（预测为错误但实际正确）
-                        for idx, pred_attr in det_wrong_list_res:
-                            if pred_attr == attr:
-                                dirty_val = str(dirty_csv.loc[idx, attr])
-                                clean_val = str(clean_csv.loc[idx, attr])
-                                if dirty_val == clean_val:  # 误报
-                                    iteration_result['misclassified_samples'].append({
-                                        'type': 'false_positive',
-                                        'attr': attr,
-                                        'idx': int(idx),
-                                        'value': dirty_csv.loc[idx, [attr] + related_attrs].to_dict(),
-                                        'dirty_val': dirty_val,
-                                        'clean_val': clean_val
-                                    })
-                        
-                        # 检查漏报（实际错误但预测为正确）
-                        detected_indices = {idx for idx, pred_attr in det_wrong_list_res if pred_attr == attr}
-                        for idx in range(len(dirty_csv)):
-                            dirty_val = str(dirty_csv.loc[idx, attr])
-                            clean_val = str(clean_csv.loc[idx, attr])
-                            if dirty_val != clean_val and idx not in detected_indices:  # 漏报
-                                iteration_result['misclassified_samples'].append({
-                                    'type': 'false_negative',
-                                    'attr': attr,
-                                    'idx': int(idx),
-                                    'value': dirty_csv.loc[idx, [attr] + related_attrs].to_dict(),
-                                    'dirty_val': dirty_val,
-                                    'clean_val': clean_val
-                                })
-                    
-                    # 保存到文件
-                    iteration_file = os.path.join(analyze_dir, f'iteration_{iteration + 1}_analysis.json')
-                    with open(iteration_file, 'w', encoding='utf-8') as f:
-                        json.dump(iteration_result, f, ensure_ascii=False, indent=2)
-                    
-                    logger.info(f"迭代 {iteration + 1} 分析结果已保存到: {iteration_file}")
-                    logger.info(f"  误分类样本数: {len(iteration_result['misclassified_samples'])}")
-                    
-                    # 保存训练集变化到文件
-                    train_change_dir = os.path.join(resp_path, 'train_set_changes')
-                    os.makedirs(train_change_dir, exist_ok=True)
-                    
-                    iteration_changes = {
-                        'iteration': iteration + 1,
-                        'changes': dict(iteration_train_changes)
-                    }
-                    
-                    changes_file = os.path.join(train_change_dir, f'iteration_{iteration + 1}_train_changes.json')
-                    with open(changes_file, 'w', encoding='utf-8') as f:
-                        json.dump(iteration_changes, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
-                    
-                    # 统计变化数量
-                    total_added = sum(len(iteration_train_changes[attr].get('added_right', [])) + len(iteration_train_changes[attr].get('added_wrong', [])) for attr in iteration_train_changes)
-                    total_removed = sum(len(iteration_train_changes[attr].get('removed_right', [])) + len(iteration_train_changes[attr].get('removed_wrong', [])) for attr in iteration_train_changes)
-                    total_new_high_conf = sum(len(iteration_train_changes[attr].get('new_high_conf_right', [])) + len(iteration_train_changes[attr].get('new_high_conf_wrong', [])) for attr in iteration_train_changes)
-                    
-                    logger.info(f"  训练集变化已保存到: {changes_file}")
-                    logger.info(f"  新加入训练集: {total_added}, 移除: {total_removed}, 新高置信度: {total_new_high_conf}")
-
-            # ==================== 步骤9: 根据高置信度样本生成函数 ====================
-            logger.info("根据高置信度样本生成函数")
-            with Timer('Generating Functions from High Confidence Samples', logger, time_file) as t:
-                err_gen_dict, funcs_for_attr = process_gen_err_funcs(
-                    FUNC_USE, resp_path, funcs_directory, dirty_csv, all_attrs,
-                    para_file, related_attrs_dict, high_confidence_right_dict, high_confidence_wrong_dict, API_USE, MODEL_TYPE
-                )
-            total_time += t.duration
-            
-            # ==================== 步骤10: 最终模型训练（使用生成的函数） ====================
-            if FUNC_USE and funcs_for_attr:
-                logger.info("使用生成的函数重新训练最终模型")
-                with Timer('Final Model Training with Functions', logger, time_file) as t:
-                    feat_dict_train = {}
-                    label_dict_train = {}
-                    
-                    for attr in all_attrs:
-                        # 获取该列的标准模式（如果有）
-                        attr_canonical_patterns = canonical_patterns_dict.get(attr, None)
-                        attr_name, feature_list, label_list = process_attr_train_feat(
-                            attr, dirty_csv, train_data_dict, related_attrs_dict,
-                            funcs_for_attr, feature_all_dict, resp_path,
-                            canonical_patterns=attr_canonical_patterns
-                        )
-                        feat_dict_train[attr] = feature_list
-                        label_dict_train[attr] = label_list
-                    
-                    for attr in tqdm(all_attrs, desc="Training final models", ncols=120):
-                        attr_name, model, _, _, _, _ = train_model(
-                            attr, feat_dict_train[attr], label_dict_train[attr], num_epochs
-                        )
-                        if model is not None:
-                            model_col[attr] = model
-                total_time += t.duration
-            
-            # ==================== 步骤11: 评估LLM标注 ====================
-            logger.info("评估LLM标注结果")
-            with Timer('Evaluating LLM Labeling', logger, time_file) as t:
-                # 转换历史标注为最终标签格式
-                _, final_labels = convert_label_history_to_train_data(
-                    index_value_label_history, dirty_csv, related_attrs_dict,
-                    0.0, all_attrs  # 使用0阈值获取所有标签
-                )
-                measure_status = measure_llm_label(
-                    resp_path, clean_csv, all_attrs, related_attrs_dict, gt_wrong_dict, final_labels
-                )
-            total_time += t.duration
-            
-            # ==================== 步骤12: 标签扩散 ====================
-            if LABEL_PROP:
-                logger.info("执行标签扩散")
-                with Timer('Label Propagation', logger, time_file) as t:
-                    det_wrong_list, det_right_list = label_prop(
-                        resp_path, dirty_path, clean_path, cluster_index_dict, final_labels, LABEL_PROP
-                    )
-                total_time += t.duration
-            else:
-                logger.info("标签扩散已禁用")
-            
-            # ==================== 步骤13: 最终预测 ====================
-            logger.info("使用最终模型进行错误检测")
-            
-            # 重新加载特征缓存
-            if os.path.exists(os.path.join(resp_path, 'cluster_feat_dict.pkl')):
-                with open(os.path.join(resp_path, 'cluster_feat_dict.pkl'), 'rb') as f:
-                    feature_all_dict = pickle.load(f)
-            
+            # ==================== 步骤8: 最终预测 ====================
+            logger.info("使用模型进行错误检测")
             det_wrong_list_res = []
             with Timer('Final Prediction', logger, time_file) as t:
-                for col, attr in tqdm(enumerate(all_attrs), desc="Making final predictions", ncols=120):
+                for col, attr in tqdm(enumerate(all_attrs), desc="Making predictions", ncols=120):
                     # 获取该列的标准模式（如果有）
                     attr_canonical_patterns = canonical_patterns_dict.get(attr, None)
-                    wrong_cells = make_predictions(
+                    wrong_cells = make_predictions_simplified(
                         col, attr, dirty_csv, model_col, related_attrs_dict,
-                        funcs_for_attr, feature_all_dict, resp_path,
-                        canonical_patterns=attr_canonical_patterns
+                        resp_path, canonical_patterns=attr_canonical_patterns
                     )
                     for cell in wrong_cells:
                         if cell not in det_wrong_list_res:
                             det_wrong_list_res.append(cell)
             total_time += t.duration
             
-            # ==================== 步骤14: 评估检测结果 ====================
+            # ==================== 步骤9: 评估检测结果 ====================
             logger.info("评估错误检测结果")
-            det_res_path = os.path.join(resp_path, "func_det_res.txt")
+            det_res_path = os.path.join(resp_path, "detection_results.txt")
             measure_detect(clean_path, dirty_path, list(det_wrong_list_res), det_res_path)
             
             # 打印预测错误详情
@@ -2914,15 +2004,14 @@ if __name__ == "__main__":
                 related_attrs_dict, logger, resp_path
             )
             
-            # ==================== 步骤15: 保存结果 ====================
-            logger.info("保存结果文件")
-            
-            # 保存高置信度和中等置信度样本
-            save_confidence_samples(
-                {'right': high_confidence_right_dict, 'wrong': high_confidence_wrong_dict},
-                {'right': mid_confidence_right_dict, 'wrong': mid_confidence_wrong_dict},
-                resp_path
+            # 保存MLP预测错误
+            mlp_errors_file = save_mlp_prediction_errors(
+                dirty_csv, clean_csv, det_wrong_list_res, all_attrs, resp_path
             )
+            logger.info(f"MLP预测错误已保存到: {mlp_errors_file}")
+            
+            # ==================== 步骤10: 保存结果 ====================
+            logger.info("保存结果文件")
             
             # 保存训练数据
             train_data_save_path = os.path.join(resp_path, 'train_data_dict.json')
@@ -2950,19 +2039,12 @@ if __name__ == "__main__":
             with open(model_save_path, 'wb') as f:
                 pickle.dump(model_col, f)
             
-            # 保存每轮F1分数（如果启用）
-            if COMPUTE_F1_PER_ITERATION and len(f1_scores_per_iteration) > 0:
-                f1_history_path = os.path.join(resp_path, 'f1_scores_per_iteration.json')
-                with open(f1_history_path, 'w', encoding='utf-8') as f:
-                    json.dump(f1_scores_per_iteration, f, ensure_ascii=False, indent=2)
-                logger.info(f"F1分数历史已保存到: {f1_history_path}")
-            
             # ==================== 完成 ====================
             time_end = time.time()
             total_time += time_end - time_start
             
             para_file.write(f"\nTotal LLM labeled samples: {labeled_number}\n")
-            para_file.write(f"Final training set size: {sum(len(train_data_dict[attr]['right']) + len(train_data_dict[attr]['wrong']) for attr in all_attrs)}\n")
+            para_file.write(f"Training set size: {sum(len(train_data_dict[attr]['right']) + len(train_data_dict[attr]['wrong']) for attr in all_attrs)}\n")
             para_file.write(f"Detected errors: {len(det_wrong_list_res)}\n")
             
             time_file.write(f"total: {total_time:.2f}s\n")
@@ -2976,4 +2058,6 @@ if __name__ == "__main__":
             logger.info(f"{'='*60}")
             
             time_file.close()
+            para_file.close()
+
             para_file.close()
