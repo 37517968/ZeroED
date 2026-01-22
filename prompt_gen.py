@@ -541,3 +541,81 @@ Please respond in the following JSON format:
 Only respond with the JSON, no additional text.
 """
     return prompt
+
+
+def error_pattern_incompatibility_prompt(attr_name, canonical_pattern_desc, error_candidate_samples):
+    """
+    生成让LLM评估错误候选模式与canonical模式对立程度的prompt
+    
+    重点：只有格式明显对立才给高分，不确定的给中等分数
+    
+    Args:
+        attr_name: 属性名称
+        canonical_pattern_desc: canonical模式的描述
+        error_candidate_samples: 错误候选模式的样本值列表（最多5个）
+    """
+    samples_str = '\n'.join([f'- "{s}"' for s in error_candidate_samples])
+    
+    prompt = f"""You are a data quality expert.
+
+Your task is to assign an INCOMPATIBILITY score (0.0–1.0) between a candidate pattern and the canonical pattern for column "{attr_name}".
+
+Follow this STRICT decision order:
+
+---
+
+STEP 1: Candidate Plausibility Check 
+
+First, look ONLY at the candidate samples below.
+Decide whether these values could reasonably be CORRECT values for the given column.
+
+If the candidate values are OBVIOUSLY WRONG or INVALID for this column:
+→ Assign a HIGH score (≥ 0.9).
+→ STOP and return the score.
+
+Candidate samples:
+{samples_str}
+
+---
+
+STEP 2: Compatibility with Canonical Pattern(MOST IMPORTANT)
+
+Only if the candidate values are PLAUSIBLE, compare them with the canonical pattern.
+
+Canonical pattern:
+{canonical_pattern_desc}
+
+Apply the following rules:
+
+A. STRING / DESCRIPTIVE columns:
+- Multiple formats or expressions may all be valid.
+    - Examples: "American IPA" vs "American Pale Ale (APA)", "Pub Beer" vs "14° ESB"
+- If the candidate and canonical could reasonably appear together in the same table:
+  → Score MUST be in [0.4, 0.7].
+- NEVER assign scores > 0.7 for DESCRIPTIVE columns unless values are clearly malformed.
+
+B. NUMERIC + UNIT columns:
+- Focus on FORMAT consistency, not semantic similarity.
+- Clear format conflicts (punctuation, unit symbols, structure differences) justify HIGH scores(≥ 0.9):
+  - Examples: "12 oz" vs "12.0 oz.", "0.5" vs "0.5%"
+  → Score may be in [0.8, 1.0].
+
+- If numeric precision, digit length, or decimal places are unconstrained
+  (e.g., IDs with varying digits, 0.4 vs 0.41):
+  → Score MUST be in [0.4, 0.6].
+
+---
+
+SCORING CONSTRAINTS (MANDATORY):
+
+- Scores > 0.8 ONLY for obvious FORMAT incompatibility.
+- Uncertainty ALWAYS maps to [0.4, 0.6].
+- If you cannot be certain the candidate is wrong, DO NOT assign a low or high score.
+
+---
+
+Return ONLY a single decimal number between 0.0 and 1.0.
+Do NOT include explanations.
+
+"""
+    return prompt

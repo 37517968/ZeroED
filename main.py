@@ -710,6 +710,7 @@ def perform_distribution_analysis(dirty_csv, col_num, col_name, config, logger):
             canonical_indices.append(idx)
     
     canonical_indices.sort(key=lambda idx: canonical_scores[idx], reverse=True)
+    canonical_indices = canonical_indices[:1]   # 只保留主canonical
     
     logger.info(f"列 '{col_name}' 有 {len(canonical_indices)} 个聚类的分数>={canonical_score_threshold}")
     for i, idx in enumerate(canonical_indices[:5]):  # 只显示前5个
@@ -761,6 +762,301 @@ def ask_llm_for_distribution_analysis(attr_name, center_values, logger):
     except Exception as e:
         logger.error(f"询问LLM分布分析决策时出错: {str(e)}")
         return False
+
+
+# 错误模式识别相关函数
+
+def calculate_separation(error_cluster_values, canonical_cluster_values):
+    """
+    计算错误簇与canonical簇的分离度
+    
+    Args:
+        error_cluster_values: 错误簇的值列表
+        canonical_cluster_values: canonical簇的值列表
+    
+    Returns:
+        separation: 分离度分数 (0-1)
+    """
+    if len(error_cluster_values) == 0 or len(canonical_cluster_values) == 0:
+        return 0.0
+    
+    # 采样以提高效率
+    sample_size = min(20, len(error_cluster_values), len(canonical_cluster_values))
+    import random
+    error_samples = random.sample(error_cluster_values, min(sample_size, len(error_cluster_values)))
+    canonical_samples = random.sample(canonical_cluster_values, min(sample_size, len(canonical_cluster_values)))
+    
+    # 计算平均距离
+    total_distance = 0.0
+    count = 0
+    
+    for e_val in error_samples:
+        for c_val in canonical_samples:
+            # 使用字符串相似度的反向作为距离
+            similarity = calculate_string_similarity(str(e_val), str(c_val))
+            distance = 1 - similarity
+            total_distance += distance
+            count += 1
+    
+    avg_distance = total_distance / count if count > 0 else 0.0
+    
+    # 归一化到0-1
+    return min(1.0, avg_distance)
+
+
+def calculate_intra_variance_inverse(cluster_values):
+    """
+    计算簇内紧致度（方差的倒数）
+    
+    Args:
+        cluster_values: 簇的值列表
+    
+    Returns:
+        compactness: 紧致度分数 (0-1)
+    """
+    if len(cluster_values) <= 1:
+        return 1.0
+    
+    # 采样以提高效率
+    sample_size = min(20, len(cluster_values))
+    import random
+    samples = random.sample(cluster_values, sample_size)
+    
+    # 计算簇内平均相似度
+    total_similarity = 0.0
+    count = 0
+    
+    for i in range(len(samples)):
+        for j in range(i + 1, len(samples)):
+            similarity = calculate_string_similarity(str(samples[i]), str(samples[j]))
+            total_similarity += similarity
+            count += 1
+    
+    avg_similarity = total_similarity / count if count > 0 else 0.0
+    
+    return avg_similarity
+
+
+def get_llm_consistency_score(attr_name, cluster_values, canonical_pattern_desc, logger):
+    """
+    使用LLM评估错误簇与canonical模式的对立程度
+    
+    Args:
+        attr_name: 属性名称
+        cluster_values: 错误簇的样本值
+        canonical_pattern_desc: canonical模式的描述
+        logger: 日志记录器
+    
+    Returns:
+        consistency_score: 对立程度分数 (0-1)，越高表示越对立
+    """
+    from prompt_gen import error_pattern_incompatibility_prompt
+    
+    # 采样
+    samples = cluster_values[:5] if len(cluster_values) > 5 else cluster_values
+    
+    # 使用新的prompt函数
+    prompt = error_pattern_incompatibility_prompt(attr_name, canonical_pattern_desc, samples)
+    
+    try:
+        response = query_base(prompt)
+        response = response.strip()
+        
+        # 尝试解析分数
+        try:
+            score = float(response)
+            score = max(0.0, min(1.0, score))
+        except ValueError:
+            # 如果无法解析，尝试从响应中提取数字
+            import re
+            numbers = re.findall(r'\d+\.?\d*', response)
+            if numbers:
+                score = float(numbers[0])
+                if score > 1.0:
+                    score = score / 100.0  # 可能是百分比
+                score = max(0.0, min(1.0, score))
+            else:
+                score = 0.5  # 默认中等分数
+        
+        if logger:
+            logger.info(f"列 '{attr_name}' 错误模式LLM对立度分数: {score:.2f}")
+        
+        return score
+    except Exception as e:
+        if logger:
+            logger.warning(f"获取LLM对立度分数时出错: {str(e)}，使用默认分数0.5")
+        return 0.5
+
+
+def calculate_error_pattern_score(error_cluster_values, canonical_cluster_values, 
+                                   canonical_pattern_desc, attr_name, logger,
+                                   alpha=0.3, beta=0.3, gamma=0.4):
+    """
+    计算错误模式分数
+    
+    Score_err(E_k) = α * Sep(E_k, C_canon) + β * IntraVar^(-1)(E_k) + γ * LLMCons(E_k)
+    
+    Args:
+        error_cluster_values: 错误簇的值列表
+        canonical_cluster_values: canonical簇的值列表
+        canonical_pattern_desc: canonical模式的描述
+        attr_name: 属性名称
+        logger: 日志记录器
+        alpha, beta, gamma: 各项权重
+    
+    Returns:
+        score: 错误模式分数
+        components: 各分量的值
+    """
+    # 计算各个分量
+    separation = calculate_separation(error_cluster_values, canonical_cluster_values)
+    compactness = calculate_intra_variance_inverse(error_cluster_values)
+    llm_consistency = get_llm_consistency_score(attr_name, error_cluster_values, 
+                                                canonical_pattern_desc, logger)
+    
+    # 计算总分
+    score = alpha * separation + beta * compactness + gamma * llm_consistency
+    
+    components = {
+        'separation': separation,
+        'compactness': compactness,
+        'llm_consistency': llm_consistency
+    }
+    
+    return score, components
+
+
+def identify_error_patterns(analysis_result, dirty_csv, logger, 
+                            error_pattern_threshold=0.6,
+                            alpha=0.3, beta=0.3, gamma=0.4):
+    """
+    识别错误模式
+    
+    Args:
+        analysis_result: 分布分析结果
+        dirty_csv: 脏数据DataFrame
+        logger: 日志记录器
+        error_pattern_threshold: 错误模式阈值
+        alpha, beta, gamma: 错误分数权重
+    
+    Returns:
+        error_patterns: 错误模式列表
+    """
+    col_name = analysis_result['col_name']
+    top_canonical_indices = analysis_result['top_canonical_indices']
+    cluster_values = analysis_result['cluster_values']
+    canonical_scores = analysis_result['canonical_scores']
+    
+    if len(top_canonical_indices) == 0:
+        logger.warning(f"列 '{col_name}' 没有canonical模式，跳过错误模式识别")
+        return []
+    
+    # 获取分数最高的canonical模式
+    best_canonical_idx = top_canonical_indices[0]
+    canonical_cluster_values = cluster_values[best_canonical_idx]
+    canonical_pattern_desc = get_cluster_pattern_description(canonical_cluster_values)
+    
+    logger.info(f"列 '{col_name}' 最佳canonical模式: 聚类{best_canonical_idx}")
+    logger.info(f"  描述: {canonical_pattern_desc}")
+    
+    # 识别错误模式
+    error_patterns = []
+    
+    # 考虑其他大聚类作为候选错误模式
+    for idx, values in enumerate(cluster_values):
+        # 跳过canonical模式
+        # if idx in top_canonical_indices:
+        #     continue
+        
+        # 只考虑足够大的聚类
+        if len(values) < 10:
+            continue
+        
+        # 计算错误模式分数
+        error_score, components = calculate_error_pattern_score(
+            values, canonical_cluster_values, canonical_pattern_desc,
+            col_name, logger, alpha, beta, gamma
+        )
+        
+        logger.info(f"  候选错误模式 聚类{idx} (大小={len(values)}): "
+                   f"错误分数={error_score:.4f} "
+                   f"(Sep={components['separation']:.2f}, "
+                   f"Compact={components['compactness']:.2f}, "
+                   f"LLMCons={components['llm_consistency']:.2f})")
+        
+        # 如果分数超过阈值，标记为错误模式
+        if error_score >= error_pattern_threshold:
+            pattern_desc = get_cluster_pattern_description(values)
+            error_pattern = {
+                'cluster_id': idx,
+                'pattern_description': pattern_desc,
+                'example_values': select_diverse_samples(values, max_samples=5),
+                'cluster_size': len(values),
+                'error_score': error_score,
+                'score_components': components
+            }
+            error_patterns.append(error_pattern)
+            logger.info(f"  ✓ 识别为错误模式: {pattern_desc}")
+    
+    logger.info(f"列 '{col_name}' 识别出 {len(error_patterns)} 个错误模式")
+    
+    return error_patterns
+
+
+def check_value_matches_error_pattern(value, error_patterns):
+    """
+    检查值是否匹配任何错误模式
+    
+    Args:
+        value: 要检查的值
+        error_patterns: 错误模式列表
+    
+    Returns:
+        matches: 是否匹配 (True/False)
+        matched_pattern_idx: 匹配的模式索引 (-1表示不匹配)
+        similarity: 与最匹配模式的相似度
+    """
+    if not error_patterns or len(error_patterns) == 0:
+        return False, -1, 0.0
+    
+    value_str = str(value)
+    max_similarity = 0.0
+    best_pattern_idx = -1
+    
+    for i, pattern in enumerate(error_patterns):
+        example_values = pattern.get('example_values', [])
+        if not example_values:
+            continue
+        
+        # 计算与示例值的相似度
+        similarities = [calculate_string_similarity(value_str, str(ex)) 
+                       for ex in example_values]
+        pattern_sim = max(similarities) if similarities else 0.0
+        
+        if pattern_sim > max_similarity:
+            max_similarity = pattern_sim
+            best_pattern_idx = i
+    
+    # 如果相似度超过阈值，认为匹配
+    matches = max_similarity > 0.7
+    
+    return matches, best_pattern_idx, max_similarity
+
+
+def calculate_error_pattern_feature(value, error_patterns):
+    """
+    计算值与错误模式的相似度特征
+    
+    Args:
+        value: 要检查的值
+        error_patterns: 错误模式列表
+    
+    Returns:
+        feature: 特征值 (0-1)，越高表示越像错误模式
+    """
+    matches, pattern_idx, similarity = check_value_matches_error_pattern(value, error_patterns)
+    return similarity
+
 
 
 def analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger):
@@ -866,7 +1162,7 @@ def calculate_pattern_similarity_feature(value, canonical_patterns):
     return max_similarity, best_pattern_idx
 
 
-def save_distribution_analysis_results(analysis_results, canonical_patterns_dict, resp_path, logger):
+def save_distribution_analysis_results(analysis_results, canonical_patterns_dict, error_patterns_dict, resp_path, logger):
     """保存分布分析结果到文件"""
     dist_analysis_dir = os.path.join(resp_path, 'distribution_analysis')
     os.makedirs(dist_analysis_dir, exist_ok=True)
@@ -907,6 +1203,12 @@ def save_distribution_analysis_results(analysis_results, canonical_patterns_dict
         json.dump(canonical_patterns_dict, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
     logger.info(f"标准模式已保存到: {patterns_file}")
     
+    # 新增：保存错误模式
+    error_patterns_file = os.path.join(dist_analysis_dir, 'error_patterns.json')
+    with open(error_patterns_file, 'w', encoding='utf-8') as f:
+        json.dump(error_patterns_dict, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+    logger.info(f"错误模式已保存到: {error_patterns_file}")
+    
     return dist_analysis_dir
 
 
@@ -924,10 +1226,18 @@ def process_distribution_analysis_for_all_columns(dirty_csv, all_attrs, config, 
         logger.info("分布分析方法未启用")
         for attr in all_attrs:
             use_distribution_analysis[attr] = False
-        return distribution_analysis_results, canonical_patterns_dict, use_distribution_analysis
+        return distribution_analysis_results, canonical_patterns_dict, error_patterns_dict, use_distribution_analysis
     
     logger.info("开始分布分析流程（默认对所有列使用）...")
     
+    # 获取错误模式识别配置
+    error_pattern_threshold = config.get('error_pattern_threshold', 0.6)
+    error_pattern_alpha = config.get('error_pattern_alpha', 0.3)
+    error_pattern_beta = config.get('error_pattern_beta', 0.3)
+    error_pattern_gamma = config.get('error_pattern_gamma', 0.4)
+    
+    error_patterns_dict = {}  # 新增：错误模式字典
+
     for col_num, attr in enumerate(all_attrs):
         logger.info(f"\n处理列 '{attr}' ({col_num + 1}/{len(all_attrs)})")
         
@@ -949,14 +1259,30 @@ def process_distribution_analysis_for_all_columns(dirty_csv, all_attrs, config, 
         canonical_patterns_dict[attr] = canonical_patterns
         
         logger.info(f"列 '{attr}' 分析完成，识别出 {len(canonical_patterns)} 个标准模式")
+        
+        # 新增：识别错误模式
+        logger.info(f"列 '{attr}' 开始识别错误模式...")
+        error_patterns = identify_error_patterns(
+            analysis_result, dirty_csv, logger,
+            error_pattern_threshold=error_pattern_threshold,
+            alpha=error_pattern_alpha,
+            beta=error_pattern_beta,
+            gamma=error_pattern_gamma
+        )
+        error_patterns_dict[attr] = error_patterns
+        
+        if len(error_patterns) > 0:
+            logger.info(f"列 '{attr}' 识别出 {len(error_patterns)} 个错误模式")
+        else:
+            logger.info(f"列 '{attr}' 未识别出错误模式")
     
     # 保存结果
     if distribution_analysis_results:
         save_distribution_analysis_results(
-            distribution_analysis_results, canonical_patterns_dict, resp_path, logger
+            distribution_analysis_results, canonical_patterns_dict, error_patterns_dict, resp_path, logger
         )
     
-    return distribution_analysis_results, canonical_patterns_dict, use_distribution_analysis
+    return distribution_analysis_results, canonical_patterns_dict, error_patterns_dict, use_distribution_analysis
 
 
 # ==================== 分布分析方法相关函数结束 ====================
@@ -1011,21 +1337,52 @@ def convert_label_history_to_train_data(index_value_label_history, dirty_csv, re
 def llm_label_indices(attr_name, indices, dirty_csv, clean_csv, related_attrs_dict, 
                       high_confidence_right_dict, high_confidence_wrong_dict,
                       error_checking_res_directory, err_check_val_num_per_query=20,
-                      canonical_patterns=None):
+                      canonical_patterns=None, error_patterns=None):
     """
     对指定的indices进行LLM标注，累积保存标注文件，并返回当前标注结果
+    
+    新增：使用错误模式进行预筛选，匹配错误模式的值直接标注为错误
     
     Returns:
         current_labels: {attr: [(idx, value, label), ...]}
     """
     related_attrs = list(related_attrs_dict[attr_name])
     
-    # 为每个索引创建数据字典
+    # 新增：使用错误模式进行预筛选
+    pre_labeled_by_error_pattern = {}  # {idx: label}
+    indices_to_llm = []  # 需要LLM标注的索引
+    
+    if error_patterns and len(error_patterns) > 0:
+        for idx in indices:
+            value = str(dirty_csv.loc[idx, attr_name])
+            matches, pattern_idx, similarity = check_value_matches_error_pattern(value, error_patterns)
+            
+            if matches:
+                # 匹配错误模式，直接标注为错误
+                pre_labeled_by_error_pattern[idx] = 1
+            else:
+                # 不匹配错误模式，需要LLM标注
+                indices_to_llm.append(idx)
+    else:
+        # 没有错误模式，所有索引都需要LLM标注
+        indices_to_llm = list(indices)
+    
+    # 如果有预标注的，记录到文件
+    if len(pre_labeled_by_error_pattern) > 0:
+        with open(os.path.join(error_checking_res_directory, f'error_pattern_pre_labeled_{attr_name}.txt'), 'a', encoding='utf-8') as f:
+            f.write(f"// Pre-labeled by error patterns: {len(pre_labeled_by_error_pattern)} samples\n")
+            for idx, label in pre_labeled_by_error_pattern.items():
+                value = str(dirty_csv.loc[idx, attr_name])
+                f.write(f"  idx={idx}: label={label}, value='{value}'\n")
+            f.write("\n")
+    
+    # 为需要LLM标注的索引创建数据字典
+    df_indices = ["{" + ",".join(f'"{col}":"{dirty_csv.loc[idx, col]}"' for col in [attr_name] + related_attrs) + "}" for idx in indices_to_llm]
     df_indices = ["{" + ",".join(f'"{col}":"{dirty_csv.loc[idx, col]}"' for col in [attr_name] + related_attrs) + "}" for idx in indices]
     
     # 将数据分成子列表进行处理
     split_values = split_list_to_sublists(df_indices, err_check_val_num_per_query)
-    split_indices = split_list_to_sublists(list(indices), err_check_val_num_per_query)
+    split_indices = split_list_to_sublists(list(indices_to_llm), err_check_val_num_per_query)
     
     all_responses = []
     
@@ -1109,6 +1466,15 @@ def llm_label_indices(attr_name, indices, dirty_csv, clean_csv, related_attrs_di
             traceback.print_exc()
     
     current_labels = extract_labels_from_responses(attr_name, all_responses, dirty_csv, related_attrs_dict)
+    
+    # 合并错误模式预标注的结果
+    if len(pre_labeled_by_error_pattern) > 0:
+        if attr_name not in current_labels:
+            current_labels[attr_name] = []
+        
+        for idx, label in pre_labeled_by_error_pattern.items():
+            value = dirty_csv.loc[idx, [attr_name] + related_attrs].to_dict()
+            current_labels[attr_name].append((idx, value, label))
     
     return current_labels
 
@@ -1225,7 +1591,7 @@ def normalize_string(s):
 # 简化版的特征生成函数（不使用预函数和函数特征）
 
 def process_attr_train_feat_simplified(attr, dirty_csv, train_data_dict, related_attrs_dict, 
-                                       resp_path, canonical_patterns=None):
+                                       resp_path, canonical_patterns=None, error_patterns=None):
     """
     处理属性的训练特征（简化版，不使用函数特征）
     
@@ -1247,14 +1613,14 @@ def process_attr_train_feat_simplified(attr, dirty_csv, train_data_dict, related
     
     for idx, val in tqdm(right_samples, ncols=120, desc=f"Processing {attr} right values"):
         feature = single_val_feat_simplified(val, fasttext_model, attr, 
-                                            list(dirty_csv.columns), canonical_patterns)
+                                            list(dirty_csv.columns), canonical_patterns, error_patterns)
         if feature:
             feature_list.append(feature)
             label_list.append(0)
     
     for idx, val in tqdm(wrong_samples, ncols=120, desc=f"Processing {attr} wrong values"):
         feature = single_val_feat_simplified(val, fasttext_model, attr, 
-                                            list(dirty_csv.columns), canonical_patterns)
+                                            list(dirty_csv.columns), canonical_patterns, error_patterns)
         if feature:
             feature_list.append(feature)
             label_list.append(1)
@@ -1262,7 +1628,7 @@ def process_attr_train_feat_simplified(attr, dirty_csv, train_data_dict, related
     return attr, feature_list, label_list
 
 
-def single_val_feat_simplified(val, fasttext_m, attr, all_attrs, canonical_patterns=None):
+def single_val_feat_simplified(val, fasttext_m, attr, all_attrs, canonical_patterns=None, error_patterns=None):
     """
     简化版的单值特征生成（不使用函数特征）
     
@@ -1291,6 +1657,16 @@ def single_val_feat_simplified(val, fasttext_m, attr, all_attrs, canonical_patte
         pattern_sim, _ = calculate_pattern_similarity_feature(attr_val, canonical_patterns)
         feature.append(pattern_sim)
     
+    # 3. 添加错误模式相似度特征（如果有）
+    if error_patterns and len(error_patterns) > 0:
+        # 获取当前列的值
+        if isinstance(val, dict):
+            attr_val = val.get(attr, '')
+        else:
+            attr_val = str(val)
+        error_pattern_sim = calculate_error_pattern_feature(attr_val, error_patterns)
+        feature.append(error_pattern_sim)
+    
     return feature
 
 def calculate_llm_consistency(label_history):
@@ -1314,7 +1690,7 @@ def calculate_llm_consistency(label_history):
     return consistency_score, majority_label
 
 def make_predictions_simplified(col, attr, dirty_csv, model_col, related_attrs_dict, 
-                                resp_path, canonical_patterns=None):
+                                resp_path, canonical_patterns=None, error_patterns=None):
     """
     简化版的预测函数（不使用函数特征）
     """
@@ -1335,7 +1711,7 @@ def make_predictions_simplified(col, attr, dirty_csv, model_col, related_attrs_d
     for idx in range(len(dirty_csv)):
         cell_val = dirty_csv.loc[idx, [attr]+related_attrs].to_dict()
         feature = single_val_feat_simplified(cell_val, fasttext_model, attr, 
-                                            columns, canonical_patterns)
+                                            columns, canonical_patterns, error_patterns)
         feature_list.append(feature)
     
     # 预测
@@ -1835,7 +2211,7 @@ if __name__ == "__main__":
             if DISTRIBUTION_ANALYSIS_CONFIG.get('enabled', False):
                 logger.info("分布分析方法已启用")
                 with Timer('Distribution Analysis', logger, time_file) as t:
-                    distribution_analysis_results, canonical_patterns_dict, use_distribution_analysis = \
+                    distribution_analysis_results, canonical_patterns_dict, error_patterns_dict, use_distribution_analysis = \
                         process_distribution_analysis_for_all_columns(
                             dirty_csv, all_attrs, DISTRIBUTION_ANALYSIS_CONFIG, resp_path, logger
                         )
@@ -1845,10 +2221,17 @@ if __name__ == "__main__":
                 dist_analysis_attrs = [attr for attr, use in use_distribution_analysis.items() if use]
                 logger.info(f"使用分布分析的列: {dist_analysis_attrs}")
                 para_file.write(f"Distribution analysis enabled for: {dist_analysis_attrs}\n")
+                
+                # 统计错误模式
+                total_error_patterns = sum(len(patterns) for patterns in error_patterns_dict.values())
+                logger.info(f"共识别出 {total_error_patterns} 个错误模式")
+                para_file.write(f"Total error patterns identified: {total_error_patterns}\n")
             else:
                 logger.info("分布分析方法未启用")
+                error_patterns_dict = {}
                 for attr in all_attrs:
                     use_distribution_analysis[attr] = False
+                    error_patterns_dict[attr] = []
             
             # ==================== 步骤3: 聚类 ====================
             cluster_index_dict, center_value_dict = {}, {}
@@ -1887,11 +2270,14 @@ if __name__ == "__main__":
                             continue
                         
                         # 调用LLM标注（不使用canonical_patterns作为上下文）
+                        # 获取该列的错误模式
+                        attr_error_patterns = error_patterns_dict.get(attr_name, [])
                         result = llm_label_indices(
                             attr_name, indices, dirty_csv, clean_csv, related_attrs_dict,
                             high_confidence_right_dict, high_confidence_wrong_dict,
                             error_checking_res_directory, err_check_val_num_per_query,
-                            canonical_patterns=None  # 不作为上下文
+                            canonical_patterns=None,  # 不作为上下文
+                            error_patterns=attr_error_patterns  # 使用错误模式预筛选
                         )
                         
                         # 将结果累积到历史标注中
@@ -1958,11 +2344,13 @@ if __name__ == "__main__":
                 label_dict_train = {}
                 
                 for attr in all_attrs:
-                    # 获取该列的标准模式（如果有）
+                    # 获取该列的标准模式和错误模式（如果有）
                     attr_canonical_patterns = canonical_patterns_dict.get(attr, None)
+                    attr_error_patterns = error_patterns_dict.get(attr, [])
                     attr_name, feature_list, label_list = process_attr_train_feat_simplified(
                         attr, dirty_csv, train_data_dict, related_attrs_dict,
-                        resp_path, canonical_patterns=attr_canonical_patterns
+                        resp_path, canonical_patterns=attr_canonical_patterns,
+                        error_patterns=attr_error_patterns
                     )
                     feat_dict_train[attr] = feature_list
                     label_dict_train[attr] = label_list
@@ -1982,11 +2370,13 @@ if __name__ == "__main__":
             det_wrong_list_res = []
             with Timer('Final Prediction', logger, time_file) as t:
                 for col, attr in tqdm(enumerate(all_attrs), desc="Making predictions", ncols=120):
-                    # 获取该列的标准模式（如果有）
+                    # 获取该列的标准模式和错误模式（如果有）
                     attr_canonical_patterns = canonical_patterns_dict.get(attr, None)
+                    attr_error_patterns = error_patterns_dict.get(attr, [])
                     wrong_cells = make_predictions_simplified(
                         col, attr, dirty_csv, model_col, related_attrs_dict,
-                        resp_path, canonical_patterns=attr_canonical_patterns
+                        resp_path, canonical_patterns=attr_canonical_patterns,
+                        error_patterns=attr_error_patterns
                     )
                     for cell in wrong_cells:
                         if cell not in det_wrong_list_res:
