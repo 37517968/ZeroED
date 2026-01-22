@@ -837,14 +837,14 @@ def calculate_intra_variance_inverse(cluster_values):
     return avg_similarity
 
 
-def get_llm_consistency_score(attr_name, cluster_values, canonical_pattern_desc, logger):
+def get_llm_consistency_score(attr_name, cluster_values, canonical_samples, logger):
     """
     使用LLM评估错误簇与canonical模式的对立程度
     
     Args:
         attr_name: 属性名称
         cluster_values: 错误簇的样本值
-        canonical_pattern_desc: canonical模式的描述
+        canonical_samples: canonical模式的示例值列表（最多5个）
         logger: 日志记录器
     
     Returns:
@@ -852,11 +852,11 @@ def get_llm_consistency_score(attr_name, cluster_values, canonical_pattern_desc,
     """
     from prompt_gen import error_pattern_incompatibility_prompt
     
-    # 采样
-    samples = cluster_values[:5] if len(cluster_values) > 5 else cluster_values
+    # 采样错误候选值
+    error_samples = cluster_values[:5] if len(cluster_values) > 5 else cluster_values
     
-    # 使用新的prompt函数
-    prompt = error_pattern_incompatibility_prompt(attr_name, canonical_pattern_desc, samples)
+    # 使用新的prompt函数（传递canonical样本值）
+    prompt = error_pattern_incompatibility_prompt(attr_name, canonical_samples, error_samples)
     
     try:
         response = query_base(prompt)
@@ -889,7 +889,7 @@ def get_llm_consistency_score(attr_name, cluster_values, canonical_pattern_desc,
 
 
 def calculate_error_pattern_score(error_cluster_values, canonical_cluster_values, 
-                                   canonical_pattern_desc, attr_name, logger,
+                                   canonical_samples, attr_name, logger,
                                    alpha=0.3, beta=0.3, gamma=0.4):
     """
     计算错误模式分数
@@ -899,7 +899,7 @@ def calculate_error_pattern_score(error_cluster_values, canonical_cluster_values
     Args:
         error_cluster_values: 错误簇的值列表
         canonical_cluster_values: canonical簇的值列表
-        canonical_pattern_desc: canonical模式的描述
+        canonical_samples: canonical模式的示例值列表（最多5个）
         attr_name: 属性名称
         logger: 日志记录器
         alpha, beta, gamma: 各项权重
@@ -912,7 +912,7 @@ def calculate_error_pattern_score(error_cluster_values, canonical_cluster_values
     separation = calculate_separation(error_cluster_values, canonical_cluster_values)
     compactness = calculate_intra_variance_inverse(error_cluster_values)
     llm_consistency = get_llm_consistency_score(attr_name, error_cluster_values, 
-                                                canonical_pattern_desc, logger)
+                                                canonical_samples, logger)
     
     # 计算总分
     score = alpha * separation + beta * compactness + gamma * llm_consistency
@@ -956,8 +956,12 @@ def identify_error_patterns(analysis_result, dirty_csv, logger,
     canonical_cluster_values = cluster_values[best_canonical_idx]
     canonical_pattern_desc = get_cluster_pattern_description(canonical_cluster_values)
     
+    # 选择5个多样化的canonical样本值用于LLM评估
+    canonical_samples = select_diverse_samples(canonical_cluster_values, max_samples=5)
+    
     logger.info(f"列 '{col_name}' 最佳canonical模式: 聚类{best_canonical_idx}")
     logger.info(f"  描述: {canonical_pattern_desc}")
+    logger.info(f"  样本值: {canonical_samples}")
     
     # 识别错误模式
     error_patterns = []
@@ -965,16 +969,16 @@ def identify_error_patterns(analysis_result, dirty_csv, logger,
     # 考虑其他大聚类作为候选错误模式
     for idx, values in enumerate(cluster_values):
         # 跳过canonical模式
-        # if idx in top_canonical_indices:
-        #     continue
+        if idx in top_canonical_indices:
+            continue
         
         # 只考虑足够大的聚类
         if len(values) < 10:
             continue
         
-        # 计算错误模式分数
+        # 计算错误模式分数（传递canonical样本值）
         error_score, components = calculate_error_pattern_score(
-            values, canonical_cluster_values, canonical_pattern_desc,
+            values, canonical_cluster_values, canonical_samples,
             col_name, logger, alpha, beta, gamma
         )
         

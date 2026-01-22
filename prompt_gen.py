@@ -519,6 +519,7 @@ Your task:
 
 Scoring guidelines:
 - **Conflicting patterns**: If patterns conflict with each other, give higher scores (0.7-1.0) to the more reasonable/canonical pattern(s), and lower scores (0.0-0.3) to the less reasonable ones
+    - Examples: "12.0 oz" vs "12.0 oz.", "12.0 oz" is more canonical
 - **Invalid patterns**: Empty values, null, 'nan', 'N/A', placeholder values should get very low scores (0.0-0.2)
 - **Valid patterns**: Clear, well-formatted, canonical patterns should get high scores (0.7-1.0)
 - **Uncertain patterns**: Ambiguous or questionable patterns should get medium scores (0.3-0.6)
@@ -543,7 +544,7 @@ Only respond with the JSON, no additional text.
     return prompt
 
 
-def error_pattern_incompatibility_prompt(attr_name, canonical_pattern_desc, error_candidate_samples):
+def error_pattern_incompatibility_prompt(attr_name, canonical_samples, error_candidate_samples):
     """
     生成让LLM评估错误候选模式与canonical模式对立程度的prompt
     
@@ -551,10 +552,11 @@ def error_pattern_incompatibility_prompt(attr_name, canonical_pattern_desc, erro
     
     Args:
         attr_name: 属性名称
-        canonical_pattern_desc: canonical模式的描述
+        canonical_samples: canonical模式的示例值列表（最多5个）
         error_candidate_samples: 错误候选模式的样本值列表（最多5个）
     """
-    samples_str = '\n'.join([f'- "{s}"' for s in error_candidate_samples])
+    canonical_samples_str = '\n'.join([f'- "{s}"' for s in canonical_samples])
+    candidate_samples_str = '\n'.join([f'- "{s}"' for s in error_candidate_samples])
     
     prompt = f"""You are a data quality expert.
 
@@ -574,42 +576,42 @@ If the candidate values are OBVIOUSLY WRONG or INVALID for this column:
 → STOP and return the score.
 
 Candidate samples:
-{samples_str}
+{candidate_samples_str}
 
 ---
 
-STEP 2: Compatibility with Canonical Pattern(MOST IMPORTANT)
+STEP 2: Compatibility with Canonical Pattern (MOST IMPORTANT)
 
-Only if the candidate values are PLAUSIBLE, compare them with the canonical pattern.
+Only if the candidate values are PLAUSIBLE, compare them with the canonical pattern samples.
 
-Canonical pattern:
-{canonical_pattern_desc}
+Canonical pattern samples (reference examples):
+{canonical_samples_str}
 
 Apply the following rules:
 
 A. STRING / DESCRIPTIVE columns:
 - Multiple formats or expressions may all be valid.
-    - Examples: "American IPA" vs "American Pale Ale (APA)", "Pub Beer" vs "14° ESB"
+    - Examples: "American IPA" vs "American Pale Ale (APA)" vs "Cider", "Pub Beer" vs "14° ESB"
 - If the candidate and canonical could reasonably appear together in the same table:
-  → Score MUST be in [0.4, 0.7].
-- NEVER assign scores > 0.7 for DESCRIPTIVE columns unless values are clearly malformed.
+  → Score MUST be in [0.3, 0.5].
+- NEVER assign scores > 0.5 for DESCRIPTIVE columns unless values are clearly malformed.
 
 B. NUMERIC + UNIT columns:
 - Focus on FORMAT consistency, not semantic similarity.
 - Clear format conflicts (punctuation, unit symbols, structure differences) justify HIGH scores(≥ 0.9):
-  - Examples: "12 oz" vs "12.0 oz.", "0.5" vs "0.5%"
-  → Score may be in [0.8, 1.0].
+  - Examples: "12.0 oz" vs "12.0 oz.", "0.5" vs "0.5%"
+  → Score may be in [0.9, 1.0].
 
 - If numeric precision, digit length, or decimal places are unconstrained
-  (e.g., IDs with varying digits, 0.4 vs 0.41):
-  → Score MUST be in [0.4, 0.6].
+  (e.g., IDs with varying digits, 0.06 vs 0.065):
+  → Score MUST be in [0.3, 0.5].
 
 ---
 
 SCORING CONSTRAINTS (MANDATORY):
 
-- Scores > 0.8 ONLY for obvious FORMAT incompatibility.
-- Uncertainty ALWAYS maps to [0.4, 0.6].
+- Scores > 0.9 ONLY for obvious FORMAT incompatibility.
+- Uncertainty ALWAYS maps to [0.3, 0.5].
 - If you cannot be certain the candidate is wrong, DO NOT assign a low or high score.
 
 ---
@@ -619,3 +621,4 @@ Do NOT include explanations.
 
 """
     return prompt
+
