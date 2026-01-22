@@ -28,9 +28,9 @@ model:
     delta: 0.60
     min_cluster_size_for_pattern: 10
     max_patterns_to_compare: 10
-    canonical_score_threshold: 0.7
+    canonical_score_threshold: 0.65
     # 错误模式识别配置
-    error_pattern_threshold: 0.75  # 错误模式分数阈值
+    error_pattern_threshold: 0.65  # 错误模式分数阈值
     error_pattern_alpha: 0.2      # 分离度权重
     error_pattern_beta: 0.2       # 紧致度权重
     error_pattern_gamma: 0.6      # LLM对立度权重

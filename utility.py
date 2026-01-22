@@ -104,7 +104,7 @@ def get_read_paths(start_time, end_time, base_dir, result_dir):
     return read_paths
 
 
-def get_ans_from_llm(prompt, api_use=False, model_type='gpt-4o-mini'):
+def get_ans_from_llm(prompt, api_use=False, model_type='qwen-flash-2025-07-28'):   # 'gpt-4o-mini'
     if not api_use:
         openai_api_key = "EMPTY"
         openai_api_base = "http://localhost:8000/v1"
@@ -139,7 +139,7 @@ def get_ans_from_llm(prompt, api_use=False, model_type='gpt-4o-mini'):
         model_type=model_type# qwen2.5-72b-instruct qwen3-max
         role_descr="You are a world-class data engineer, proficient in cleaning dirty data."
         api_key_list = [
-            'sk-9SSJQSfSLf7aUtfTCMhCgsxiw5deylXvOUuHtPCDDB3Sa1ds' # sk-cf0f901fbe8847099502a50aa2d59ec9
+            'sk-cf0f901fbe8847099502a50aa2d59ec9' # sk-9SSJQSfSLf7aUtfTCMhCgsxiw5deylXvOUuHtPCDDB3Sa1ds
         ]
         # Exponential backoff parameters
         base_sleep = 0.2
@@ -151,7 +151,7 @@ def get_ans_from_llm(prompt, api_use=False, model_type='gpt-4o-mini'):
             try:
                 client = OpenAI(
                     api_key=api_key_list[key_idx],
-                    base_url='https://jeniya.cn/v1' # https://dashscope.aliyuncs.com/compatible-mode/v1
+                    base_url='https://dashscope.aliyuncs.com/compatible-mode/v1' #  https://jeniya.cn/v1
                 )
                 completion_res = client.chat.completions.create(
                     model=model_type,
