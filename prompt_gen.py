@@ -520,6 +520,7 @@ Your task:
 Scoring guidelines:
 - **Conflicting patterns**: If patterns conflict with each other, give higher scores (0.7-1.0) to the more reasonable/canonical pattern(s), and lower scores (0.0-0.3) to the less reasonable ones
     - Examples: "12.0 oz" vs "12.0 oz.", "12.0 oz" is more canonical
+                "eng" vs "English", "eng" is more canonical
 - **Invalid patterns**: Empty values, null, 'nan', 'N/A', placeholder values should get very low scores (0.0-0.2)
 - **Valid patterns**: Clear, well-formatted, canonical patterns should get high scores (0.7-1.0)
 - **Uncertain patterns**: Ambiguous or questionable patterns should get medium scores (0.3-0.6)
@@ -599,7 +600,7 @@ A. STRING / DESCRIPTIVE columns:
 B. NUMERIC + UNIT columns:
 - Focus on FORMAT consistency, not semantic similarity.
 - Clear format conflicts (punctuation, unit symbols, structure differences) justify HIGH scores(≥ 0.9):
-  - Examples: "12.0 oz" vs "12.0 oz.", "0.5" vs "0.5%"
+  - Examples: "12.0 oz" vs "12.0 oz.", "0.5" vs "0.5%", "eng" vs "English"
   → Score may be in [0.9, 1.0].
 
 - If numeric precision, digit length, or decimal places are unconstrained

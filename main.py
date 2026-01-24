@@ -492,6 +492,160 @@ def get_cluster_pattern_description(cluster_values):
     return description
 
 
+
+
+def generate_regex_from_samples(sample_values, attr_name=None):
+    """
+    从样本值生成正则表达式模式
+    
+    Args:
+        sample_values: 样本值列表
+        attr_name: 属性名称（可选，用于优化）
+    
+    Returns:
+        regex_pattern: 正则表达式字符串，如果无法生成则返回None
+    """
+    from feature import L2_str_agg
+    from collections import Counter
+    import re
+    
+    if not sample_values or len(sample_values) == 0:
+        return None
+    
+    # 获取所有样本的pattern
+    patterns = [L2_str_agg(str(v)) for v in sample_values]
+    pattern_counter = Counter(patterns)
+    
+    # 如果所有样本都有相同的pattern，生成对应的正则
+    if len(pattern_counter) == 1:
+        pattern = list(pattern_counter.keys())[0]
+        regex = pattern_to_regex(pattern, sample_values)
+        return regex
+    
+    # 如果有多个pattern但主导pattern占比>80%，使用主导pattern
+    most_common_pattern, count = pattern_counter.most_common(1)[0]
+    if count / len(sample_values) >= 0.8:
+        regex = pattern_to_regex(most_common_pattern, sample_values)
+        return regex
+    
+    # 否则尝试找到更通用的模式
+    # 检查是否所有值都是数字
+    if all(str(v).replace('.', '').replace('-', '').replace('+', '').isdigit() for v in sample_values):
+        # 数字模式
+        has_decimal = any('.' in str(v) for v in sample_values)
+        if has_decimal:
+            return r'^\d+\.?\d*$'
+        else:
+            return r'^\d+$'
+    
+    # 检查是否都是字母
+    if all(str(v).replace(' ', '').replace('-', '').isalpha() for v in sample_values):
+        return r'^[A-Za-z\s\-]+$'
+    
+    # 无法生成统一的正则
+    return None
+
+
+def pattern_to_regex(pattern, sample_values):
+    """
+    将L2_str_agg的pattern转换为正则表达式
+    
+    Pattern格式: L表示字母, N表示数字, S表示符号, 用-分隔
+    例如: "N-N-S" 表示 数字-数字-符号
+    
+    Args:
+        pattern: L2_str_agg生成的pattern字符串
+        sample_values: 样本值列表（用于确定具体细节）
+    
+    Returns:
+        regex: 正则表达式字符串
+    """
+    import re
+    
+    if not pattern or pattern == "Unknown":
+        return None
+    
+    # 分析样本值的具体特征
+    sample_strs = [str(v) for v in sample_values]
+    
+    # 检查是否有固定的符号或单位
+    # 例如: "12 oz", "16 oz" -> 固定单位 "oz"
+    common_suffix = find_common_suffix(sample_strs)
+    common_prefix = find_common_prefix(sample_strs)
+    
+    # 构建正则表达式
+    regex_parts = []
+    
+    if common_prefix:
+        regex_parts.append(re.escape(common_prefix))
+    
+    # 解析pattern
+    parts = pattern.split('-')
+    for part in parts:
+        if part == 'L':
+            regex_parts.append(r'[A-Za-z]+')
+        elif part == 'N':
+            # 检查是否有小数点
+            has_decimal = any('.' in s for s in sample_strs)
+            if has_decimal:
+                regex_parts.append(r'\d+\.?\d*')
+            else:
+                regex_parts.append(r'\d+')
+        elif part == 'S':
+            # 符号，尝试找出具体是什么符号
+            symbols = set()
+            for s in sample_strs:
+                for char in s:
+                    if not char.isalnum() and not char.isspace():
+                        symbols.add(char)
+            if symbols:
+                escaped_symbols = [re.escape(sym) for sym in symbols]
+                regex_parts.append(f"[{''.join(escaped_symbols)}]")
+            else:
+                regex_parts.append(r'[^\w\s]')
+        else:
+            # 未知类型，使用通配
+            regex_parts.append(r'.+')
+    
+    if common_suffix:
+        regex_parts.append(re.escape(common_suffix))
+    
+    # 组合正则表达式
+    if len(regex_parts) == 0:
+        return None
+    
+    # 添加可能的空格
+    regex = r'^\s*' + r'\s*'.join(regex_parts) + r'\s*$'
+    
+    return regex
+
+
+def find_common_prefix(strings):
+    """找到字符串列表的公共前缀"""
+    if not strings:
+        return ""
+    
+    prefix = strings[0]
+    for s in strings[1:]:
+        while not s.startswith(prefix):
+            prefix = prefix[:-1]
+            if not prefix:
+                return ""
+    
+    return prefix
+
+
+def find_common_suffix(strings):
+    """找到字符串列表的公共后缀"""
+    if not strings:
+        return ""
+    
+    # 反转字符串找前缀，然后再反转回来
+    reversed_strings = [s[::-1] for s in strings]
+    reversed_suffix = find_common_prefix(reversed_strings)
+    
+    return reversed_suffix[::-1]
+
 def select_diverse_samples(cluster_values, max_samples=3):
     """
     从聚类值中选择尽可能不同的样本
@@ -766,166 +920,6 @@ def ask_llm_for_distribution_analysis(attr_name, center_values, logger):
 
 # 错误模式识别相关函数
 
-def calculate_separation(error_cluster_values, canonical_cluster_values):
-    """
-    计算错误簇与canonical簇的分离度
-    
-    Args:
-        error_cluster_values: 错误簇的值列表
-        canonical_cluster_values: canonical簇的值列表
-    
-    Returns:
-        separation: 分离度分数 (0-1)
-    """
-    if len(error_cluster_values) == 0 or len(canonical_cluster_values) == 0:
-        return 0.0
-    
-    # 采样以提高效率
-    sample_size = min(20, len(error_cluster_values), len(canonical_cluster_values))
-    import random
-    error_samples = random.sample(error_cluster_values, min(sample_size, len(error_cluster_values)))
-    canonical_samples = random.sample(canonical_cluster_values, min(sample_size, len(canonical_cluster_values)))
-    
-    # 计算平均距离
-    total_distance = 0.0
-    count = 0
-    
-    for e_val in error_samples:
-        for c_val in canonical_samples:
-            # 使用字符串相似度的反向作为距离
-            similarity = calculate_string_similarity(str(e_val), str(c_val))
-            distance = 1 - similarity
-            total_distance += distance
-            count += 1
-    
-    avg_distance = total_distance / count if count > 0 else 0.0
-    
-    # 归一化到0-1
-    return min(1.0, avg_distance)
-
-
-def calculate_intra_variance_inverse(cluster_values):
-    """
-    计算簇内紧致度（方差的倒数）
-    
-    Args:
-        cluster_values: 簇的值列表
-    
-    Returns:
-        compactness: 紧致度分数 (0-1)
-    """
-    if len(cluster_values) <= 1:
-        return 1.0
-    
-    # 采样以提高效率
-    sample_size = min(20, len(cluster_values))
-    import random
-    samples = random.sample(cluster_values, sample_size)
-    
-    # 计算簇内平均相似度
-    total_similarity = 0.0
-    count = 0
-    
-    for i in range(len(samples)):
-        for j in range(i + 1, len(samples)):
-            similarity = calculate_string_similarity(str(samples[i]), str(samples[j]))
-            total_similarity += similarity
-            count += 1
-    
-    avg_similarity = total_similarity / count if count > 0 else 0.0
-    
-    return avg_similarity
-
-
-def get_llm_consistency_score(attr_name, cluster_values, canonical_samples, logger):
-    """
-    使用LLM评估错误簇与canonical模式的对立程度
-    
-    Args:
-        attr_name: 属性名称
-        cluster_values: 错误簇的样本值
-        canonical_samples: canonical模式的示例值列表（最多5个）
-        logger: 日志记录器
-    
-    Returns:
-        consistency_score: 对立程度分数 (0-1)，越高表示越对立
-    """
-    from prompt_gen import error_pattern_incompatibility_prompt
-    
-    # 采样错误候选值
-    error_samples = cluster_values[:5] if len(cluster_values) > 5 else cluster_values
-    
-    # 使用新的prompt函数（传递canonical样本值）
-    prompt = error_pattern_incompatibility_prompt(attr_name, canonical_samples, error_samples)
-    
-    try:
-        response = query_base(prompt)
-        response = response.strip()
-        
-        # 尝试解析分数
-        try:
-            score = float(response)
-            score = max(0.0, min(1.0, score))
-        except ValueError:
-            # 如果无法解析，尝试从响应中提取数字
-            import re
-            numbers = re.findall(r'\d+\.?\d*', response)
-            if numbers:
-                score = float(numbers[0])
-                if score > 1.0:
-                    score = score / 100.0  # 可能是百分比
-                score = max(0.0, min(1.0, score))
-            else:
-                score = 0.5  # 默认中等分数
-        
-        if logger:
-            logger.info(f"列 '{attr_name}' 错误模式LLM对立度分数: {score:.2f}")
-        
-        return score
-    except Exception as e:
-        if logger:
-            logger.warning(f"获取LLM对立度分数时出错: {str(e)}，使用默认分数0.5")
-        return 0.5
-
-
-def calculate_error_pattern_score(error_cluster_values, canonical_cluster_values, 
-                                   canonical_samples, attr_name, logger,
-                                   alpha=0.3, beta=0.3, gamma=0.4):
-    """
-    计算错误模式分数
-    
-    Score_err(E_k) = α * Sep(E_k, C_canon) + β * IntraVar^(-1)(E_k) + γ * LLMCons(E_k)
-    
-    Args:
-        error_cluster_values: 错误簇的值列表
-        canonical_cluster_values: canonical簇的值列表
-        canonical_samples: canonical模式的示例值列表（最多5个）
-        attr_name: 属性名称
-        logger: 日志记录器
-        alpha, beta, gamma: 各项权重
-    
-    Returns:
-        score: 错误模式分数
-        components: 各分量的值
-    """
-    # 计算各个分量
-    separation = calculate_separation(error_cluster_values, canonical_cluster_values)
-    compactness = calculate_intra_variance_inverse(error_cluster_values)
-    llm_consistency = get_llm_consistency_score(attr_name, error_cluster_values, 
-                                                canonical_samples, logger)
-    
-    # 计算总分
-    score = alpha * separation + beta * compactness + gamma * llm_consistency
-    
-    components = {
-        'separation': separation,
-        'compactness': compactness,
-        'llm_consistency': llm_consistency
-    }
-    
-    return score, components
-
-
 def identify_error_patterns(analysis_result, dirty_csv, logger, 
                             error_pattern_threshold=0.6,
                             alpha=0.3, beta=0.3, gamma=0.4):
@@ -976,31 +970,56 @@ def identify_error_patterns(analysis_result, dirty_csv, logger,
         if len(values) < 10:
             continue
         
-        # 计算错误模式分数（传递canonical样本值）
-        error_score, components = calculate_error_pattern_score(
-            values, canonical_cluster_values, canonical_samples,
-            col_name, logger, alpha, beta, gamma
-        )
+        # 使用LLM判断是否为错误模式
+        from prompt_gen import error_pattern_incompatibility_prompt
+        error_samples = select_diverse_samples(values, max_samples=5)
         
-        logger.info(f"  候选错误模式 聚类{idx} (大小={len(values)}): "
-                   f"错误分数={error_score:.4f} "
-                   f"(Sep={components['separation']:.2f}, "
-                   f"Compact={components['compactness']:.2f}, "
-                   f"LLMCons={components['llm_consistency']:.2f})")
+        try:
+            prompt = error_pattern_incompatibility_prompt(col_name, canonical_samples, error_samples)
+            response = query_base(prompt)
+            response = response.strip()
+            
+            # 解析LLM返回的不兼容性分数
+            try:
+                incompatibility_score = float(response)
+                incompatibility_score = max(0.0, min(1.0, incompatibility_score))
+            except ValueError:
+                import re
+                numbers = re.findall(r'\d+\.?\d*', response)
+                if numbers:
+                    incompatibility_score = float(numbers[0])
+                    if incompatibility_score > 1.0:
+                        incompatibility_score = incompatibility_score / 100.0
+                    incompatibility_score = max(0.0, min(1.0, incompatibility_score))
+                else:
+                    incompatibility_score = 0.5
+            
+            logger.info(f"  候选错误模式 聚类{idx} (大小={len(values)}): "
+                       f"不兼容性分数={incompatibility_score:.4f}")
+            
+            # 如果不兼容性分数超过阈值，标记为错误模式
+            if incompatibility_score >= error_pattern_threshold:
+                pattern_desc = get_cluster_pattern_description(values)
+                
+                # 生成正则表达式用于精确匹配
+                regex_pattern = generate_regex_from_samples(values, col_name)
+                
+                error_pattern = {
+                    'cluster_id': idx,
+                    'pattern_description': pattern_desc,
+                    'example_values': error_samples,
+                    'regex_pattern': regex_pattern,
+                    'cluster_size': len(values),
+                    'incompatibility_score': incompatibility_score
+                }
+                error_patterns.append(error_pattern)
+                logger.info(f"  ✓ 识别为错误模式: {pattern_desc}")
+                if regex_pattern:
+                    logger.info(f"    正则表达式: {regex_pattern}")
         
-        # 如果分数超过阈值，标记为错误模式
-        if error_score >= error_pattern_threshold:
-            pattern_desc = get_cluster_pattern_description(values)
-            error_pattern = {
-                'cluster_id': idx,
-                'pattern_description': pattern_desc,
-                'example_values': select_diverse_samples(values, max_samples=5),
-                'cluster_size': len(values),
-                'error_score': error_score,
-                'score_components': components
-            }
-            error_patterns.append(error_pattern)
-            logger.info(f"  ✓ 识别为错误模式: {pattern_desc}")
+        except Exception as e:
+            logger.warning(f"  评估聚类{idx}时出错: {str(e)}")
+            continue
     
     logger.info(f"列 '{col_name}' 识别出 {len(error_patterns)} 个错误模式")
     
@@ -1009,7 +1028,7 @@ def identify_error_patterns(analysis_result, dirty_csv, logger,
 
 def check_value_matches_error_pattern(value, error_patterns):
     """
-    检查值是否匹配任何错误模式
+    检查值是否匹配任何错误模式（使用正则表达式精确匹配）
     
     Args:
         value: 要检查的值
@@ -1018,48 +1037,87 @@ def check_value_matches_error_pattern(value, error_patterns):
     Returns:
         matches: 是否匹配 (True/False)
         matched_pattern_idx: 匹配的模式索引 (-1表示不匹配)
-        similarity: 与最匹配模式的相似度
     """
-    if not error_patterns or len(error_patterns) == 0:
-        return False, -1, 0.0
+    import re
     
-    value_str = str(value)
-    max_similarity = 0.0
-    best_pattern_idx = -1
+    if not error_patterns or len(error_patterns) == 0:
+        return False, -1
+    
+    value_str = str(value).strip()
     
     for i, pattern in enumerate(error_patterns):
+        regex_pattern = pattern.get('regex_pattern')
+        
+        # 如果有正则表达式，使用正则匹配
+        if regex_pattern:
+            try:
+                if re.match(regex_pattern, value_str):
+                    return True, i
+            except re.error:
+                # 正则表达式无效，跳过
+                pass
+        
+        # 如果没有正则表达式，使用示例值精确匹配
         example_values = pattern.get('example_values', [])
-        if not example_values:
-            continue
-        
-        # 计算与示例值的相似度
-        similarities = [calculate_string_similarity(value_str, str(ex)) 
-                       for ex in example_values]
-        pattern_sim = max(similarities) if similarities else 0.0
-        
-        if pattern_sim > max_similarity:
-            max_similarity = pattern_sim
-            best_pattern_idx = i
+        if value_str in [str(ex).strip() for ex in example_values]:
+            return True, i
     
-    # 如果相似度超过阈值，认为匹配
-    matches = max_similarity > 0.7
-    
-    return matches, best_pattern_idx, max_similarity
+    return False, -1
 
+
+
+
+def check_value_matches_canonical_pattern(value, canonical_patterns):
+    """
+    检查值是否匹配任何正确模式（使用正则表达式精确匹配）
+    
+    Args:
+        value: 要检查的值
+        canonical_patterns: 正确模式列表
+    
+    Returns:
+        matches: 是否匹配 (True/False)
+        matched_pattern_idx: 匹配的模式索引 (-1表示不匹配)
+    """
+    import re
+    
+    if not canonical_patterns or len(canonical_patterns) == 0:
+        return False, -1
+    
+    value_str = str(value).strip()
+    
+    for i, pattern in enumerate(canonical_patterns):
+        regex_pattern = pattern.get('regex_pattern')
+        
+        # 如果有正则表达式，使用正则匹配
+        if regex_pattern and regex_pattern != 'N/A':
+            try:
+                if re.match(regex_pattern, value_str):
+                    return True, i
+            except re.error:
+                # 正则表达式无效，跳过
+                pass
+        
+        # 如果没有正则表达式，使用示例值精确匹配
+        example_values = pattern.get('example_valid_values', [])
+        if value_str in [str(ex).strip() for ex in example_values]:
+            return True, i
+    
+    return False, -1
 
 def calculate_error_pattern_feature(value, error_patterns):
     """
-    计算值与错误模式的相似度特征
+    计算值与错误模式的匹配特征
     
     Args:
         value: 要检查的值
         error_patterns: 错误模式列表
     
     Returns:
-        feature: 特征值 (0-1)，越高表示越像错误模式
+        feature: 特征值 (0或1)，1表示匹配错误模式
     """
-    matches, pattern_idx, similarity = check_value_matches_error_pattern(value, error_patterns)
-    return similarity
+    matches, pattern_idx = check_value_matches_error_pattern(value, error_patterns)
+    return 1.0 if matches else 0.0
 
 
 
@@ -1095,6 +1153,14 @@ def analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger):
                 pattern['cluster_id'] = idx
                 pattern['canonical_score'] = score
                 pattern['llm_canonicality_score'] = llm_canon_score  # 添加LLM评分
+                
+                # 如果LLM没有生成有效的正则表达式，自动生成一个
+                if not pattern.get('regex_pattern') or pattern.get('regex_pattern') == 'N/A':
+                    auto_regex = generate_regex_from_samples(cluster_values[idx], col_name)
+                    if auto_regex:
+                        pattern['regex_pattern'] = auto_regex
+                        logger.info(f"  自动生成正则表达式: {auto_regex}")
+                
                 canonical_patterns.append(pattern)
                 logger.info(f"列 '{col_name}' 聚类{idx} 标准模式: {pattern.get('pattern_name', 'Unknown')}, LLM分数: {llm_canon_score:.2f}")
             else:
@@ -1103,13 +1169,23 @@ def analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger):
                     pattern['cluster_id'] = idx
                     pattern['canonical_score'] = score
                     pattern['llm_canonicality_score'] = llm_canon_score  # 添加LLM评分
+                    
+                    # 如果LLM没有生成有效的正则表达式，自动生成一个
+                    if not pattern.get('regex_pattern') or pattern.get('regex_pattern') == 'N/A':
+                        auto_regex = generate_regex_from_samples(cluster_values[idx], col_name)
+                        if auto_regex:
+                            pattern['regex_pattern'] = auto_regex
+                            logger.info(f"  自动生成正则表达式: {auto_regex}")
+                    
                     canonical_patterns.append(pattern)
                 except:
                     logger.warning(f"列 '{col_name}' 聚类{idx} 无法解析LLM响应")
+                    # 自动生成正则表达式
+                    auto_regex = generate_regex_from_samples(cluster_values[idx], col_name)
                     canonical_patterns.append({
                         'pattern_name': f'Pattern_{idx}',
                         'pattern_description': f'Cluster {idx} pattern',
-                        'regex_pattern': 'N/A',
+                        'regex_pattern': auto_regex if auto_regex else 'N/A',
                         'key_characteristics': [],
                         'example_valid_values': samples[:3],
                         'common_errors': [],
@@ -1117,6 +1193,8 @@ def analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger):
                         'canonical_score': score,
                         'llm_canonicality_score': llm_canon_score  # 添加LLM评分
                     })
+                    if auto_regex:
+                        logger.info(f"  自动生成正则表达式: {auto_regex}")
         except Exception as e:
             logger.error(f"分析列 '{col_name}' 聚类{idx} 标准模式时出错: {str(e)}")
             canonical_patterns.append({
@@ -1353,25 +1431,24 @@ def llm_label_indices(attr_name, indices, dirty_csv, clean_csv, related_attrs_di
     related_attrs = list(related_attrs_dict[attr_name])
     
     # 新增：使用错误模式进行预筛选
-    pre_labeled_by_error_pattern = {}  # {idx: label}
+    pre_labeled_by_error_pattern = {}  # {idx: label} - 匹配错误模式，直接标注为错误
     indices_to_llm = []  # 需要LLM标注的索引
     
-    if error_patterns and len(error_patterns) > 0:
-        for idx in indices:
-            value = str(dirty_csv.loc[idx, attr_name])
-            matches, pattern_idx, similarity = check_value_matches_error_pattern(value, error_patterns)
-            
-            if matches:
-                # 匹配错误模式，直接标注为错误
+    for idx in indices:
+        value = str(dirty_csv.loc[idx, attr_name])
+        
+        # 检查是否匹配错误模式
+        if error_patterns and len(error_patterns) > 0:
+            error_matches, error_pattern_idx = check_value_matches_error_pattern(value, error_patterns)
+            if error_matches:
+                # 匹配错误模式，直接标注为错误，不需要LLM标注
                 pre_labeled_by_error_pattern[idx] = 1
-            else:
-                # 不匹配错误模式，需要LLM标注
-                indices_to_llm.append(idx)
-    else:
-        # 没有错误模式，所有索引都需要LLM标注
-        indices_to_llm = list(indices)
+                continue
+        
+        # 不匹配错误模式，需要LLM标注
+        indices_to_llm.append(idx)
     
-    # 如果有预标注的，记录到文件
+    # 记录预标注信息
     if len(pre_labeled_by_error_pattern) > 0:
         with open(os.path.join(error_checking_res_directory, f'error_pattern_pre_labeled_{attr_name}.txt'), 'a', encoding='utf-8') as f:
             f.write(f"// Pre-labeled by error patterns: {len(pre_labeled_by_error_pattern)} samples\n")
@@ -1380,13 +1457,49 @@ def llm_label_indices(attr_name, indices, dirty_csv, clean_csv, related_attrs_di
                 f.write(f"  idx={idx}: label={label}, value='{value}'\n")
             f.write("\n")
     
-    # 为需要LLM标注的索引创建数据字典
-    df_indices = ["{" + ",".join(f'"{col}":"{dirty_csv.loc[idx, col]}"' for col in [attr_name] + related_attrs) + "}" for idx in indices_to_llm]
-    df_indices = ["{" + ",".join(f'"{col}":"{dirty_csv.loc[idx, col]}"' for col in [attr_name] + related_attrs) + "}" for idx in indices]
-    
     # 将数据分成子列表进行处理
-    split_values = split_list_to_sublists(df_indices, err_check_val_num_per_query)
     split_indices = split_list_to_sublists(list(indices_to_llm), err_check_val_num_per_query)
+    
+    # 在每一批内部进行排序：匹配正确模式的放在最前面
+    sorted_split_indices = []
+    for batch_indices in split_indices:
+        canonical_matched = []
+        other_matched = []
+        
+        for idx in batch_indices:
+            value = str(dirty_csv.loc[idx, attr_name])
+            # 检查是否匹配正确模式
+            if canonical_patterns and len(canonical_patterns) > 0:
+                canonical_matches, _ = check_value_matches_canonical_pattern(value, canonical_patterns)
+                if canonical_matches:
+                    canonical_matched.append(idx)
+                else:
+                    other_matched.append(idx)
+            else:
+                other_matched.append(idx)
+        
+        # 合并：正确模式匹配的放在最前面
+        sorted_batch = canonical_matched + other_matched
+        sorted_split_indices.append(sorted_batch)
+        
+        # 记录每批中匹配正确模式的数量
+        if len(canonical_matched) > 0:
+            with open(os.path.join(error_checking_res_directory, f'canonical_pattern_matched_{attr_name}.txt'), 'a', encoding='utf-8') as f:
+                f.write(f"// Batch with {len(canonical_matched)} canonical matches (prioritized):\n")
+                for idx in canonical_matched:
+                    value = str(dirty_csv.loc[idx, attr_name])
+                    f.write(f"  idx={idx}: value='{value}'\n")
+                f.write("\n")
+    
+    # 为排序后的索引创建数据字典
+    split_values = []
+    for batch_indices in sorted_split_indices:
+        batch_values = ["{" + ",".join(f'"{col}":"{dirty_csv.loc[idx, col]}"' for col in [attr_name] + related_attrs) + "}" for idx in batch_indices]
+        split_values.append(batch_values)
+    
+    split_indices = sorted_split_indices
+    
+    all_responses = []
     
     all_responses = []
     
