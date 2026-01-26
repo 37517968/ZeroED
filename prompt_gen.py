@@ -585,14 +585,19 @@ Scoring Principles (IMPORTANT):
 Can these two patterns reasonably appear together in the same dataset column?
 
 2. High Incompatibility (0.8–1.0):
-Assign ONLY if at least one is true:
-- The candidate pattern is clearly erroneous or malformed.
-- The two patterns are similar but with incompatible FORMAT conventions.
-- Their coexistence in one column is very unlikely.
+- Assign ONLY when you are confident that coexistence is unlikely due to a clear FORMAT conflict.
+- This applies only you are confident that the value is not correct. (such as null)
+- This applies when both patterns express the same type of information but follow incompatible formatting conventions.
+
 Examples:
 - "12.0 oz" vs "12.0 oz."
 - "0.5" vs "0.5%"
-- String vs String+unit
+- String vs String+unit(some String end up with '.' is probably confilct with String not)
+- When column name is '**_title', abbreviation is probably be false.
+
+Exception:
+Do NOT assign high scores if the format variation may be valid or domain-dependent
+(e.g., an 'X' suffix in journal_issn).
 
 3. Medium Incompatibility (0.3–0.5):
 Assign if:
@@ -605,7 +610,7 @@ Examples:
 - Different ID lengths
 - Different numeric precision
 - There maybe 'X' at the end of journal_issn.
-- "Jan-68" may also be a correct journal_issn.
+- There maybe different expressions in "journal_title" are true.
 
 4. Uncertainty Rule:
 If you are unsure, ALWAYS assign a score in [0.3, 0.5].
@@ -680,4 +685,52 @@ IMPORTANT:
 
 Only respond with the JSON, no additional text.
 """
+    return prompt
+
+
+def pattern_function_generation_prompt(attr_name, cluster_description, sample_values):
+    """
+    生成模式匹配函数的提示词
+    
+    Args:
+        attr_name: 属性名称
+        cluster_description: 聚类的自然语言描述
+        sample_values: 样本值列表（最多10个）
+    
+    Returns:
+        prompt: 提示词字符串
+    """
+    samples_str = '\n'.join([f'- "{s}"' for s in sample_values])
+    
+    prompt = f"""You are a data quality expert. Generate a Python function to validate if a value matches the following pattern.
+
+Column: '{attr_name if attr_name else "unknown"}'
+Pattern Description: {cluster_description}
+
+Sample values from this pattern:
+{samples_str}
+
+Your task:
+Generate a Python function named 'matches_pattern' that:
+1. Takes a single parameter 'value' (string)
+2. Returns True if the value matches this pattern, False otherwise
+3. Handles edge cases (empty strings, None, etc.)
+4. Is self-contained (only use standard library like re, datetime, etc.)
+
+IMPORTANT:
+- Focus on the key characteristics described in the pattern description
+- Be neither too strict nor too loose
+- Return ONLY the Python function code, no explanations or markdown
+
+Example output format:
+def matches_pattern(value):
+    if not value or not isinstance(value, str):
+        return False
+    value = value.strip()
+    # Your validation logic here based on the pattern description
+    # For example, if pattern is "5-digit numbers":
+    # return value.isdigit() and len(value) == 5
+    return True
+"""
+    
     return prompt

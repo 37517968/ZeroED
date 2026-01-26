@@ -9,6 +9,29 @@ from collections import defaultdict
 
 from openai import OpenAI
 
+# 全局LLM配置
+_DISTRIBUTION_ANALYSIS_LLM_CONFIG = None
+_ANNOTATION_LLM_CONFIG = None
+
+def set_distribution_analysis_llm_config(config):
+    """设置分布分析LLM配置"""
+    global _DISTRIBUTION_ANALYSIS_LLM_CONFIG
+    _DISTRIBUTION_ANALYSIS_LLM_CONFIG = config
+
+def set_annotation_llm_config(config):
+    """设置标注LLM配置"""
+    global _ANNOTATION_LLM_CONFIG
+    _ANNOTATION_LLM_CONFIG = config
+
+def get_distribution_analysis_llm_config():
+    """获取分布分析LLM配置"""
+    return _DISTRIBUTION_ANALYSIS_LLM_CONFIG
+
+def get_annotation_llm_config():
+    """获取标注LLM配置"""
+    return _ANNOTATION_LLM_CONFIG
+
+
 
 class Timer:
     def __init__(self, name, logger, time_file):
@@ -104,7 +127,24 @@ def get_read_paths(start_time, end_time, base_dir, result_dir):
     return read_paths
 
 
-def get_ans_from_llm(prompt, api_use=False, model_type='qwen-flash-2025-07-28'):   # 'gpt-4o-mini'
+def get_ans_from_llm(prompt, api_use=False, model_type='qwen-flash-2025-07-28', llm_config=None, use_distribution_config=False):   # 'gpt-4o-mini'
+    # 如果没有提供llm_config，尝试使用全局配置
+    if llm_config is None:
+        if use_distribution_config:
+            llm_config = get_distribution_analysis_llm_config()
+        else:
+            llm_config = get_annotation_llm_config()
+    
+    # 如果提供了llm_config，使用配置中的参数
+    if llm_config:
+        api_use = llm_config.get('api_use', api_use)
+        model_type = llm_config.get('model_type', model_type)
+        api_key_list = llm_config.get('api_keys', ['sk-cf0f901fbe8847099502a50aa2d59ec9'])
+        base_url = llm_config.get('base_url', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+    else:
+        api_key_list = ['sk-cf0f901fbe8847099502a50aa2d59ec9']
+        base_url = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+    
     if not api_use:
         openai_api_key = "EMPTY"
         openai_api_base = "http://localhost:8000/v1"
@@ -138,9 +178,7 @@ def get_ans_from_llm(prompt, api_use=False, model_type='qwen-flash-2025-07-28'):
         # model_type='llama-3-8b'
         model_type=model_type# qwen2.5-72b-instruct qwen3-max
         role_descr="You are a world-class data engineer, proficient in cleaning dirty data."
-        api_key_list = [
-            'sk-cf0f901fbe8847099502a50aa2d59ec9' # sk-9SSJQSfSLf7aUtfTCMhCgsxiw5deylXvOUuHtPCDDB3Sa1ds
-        ]
+        # api_key_list 和 base_url 已在函数开头设置
         # Exponential backoff parameters
         base_sleep = 0.2
         max_retries = 200
@@ -151,7 +189,7 @@ def get_ans_from_llm(prompt, api_use=False, model_type='qwen-flash-2025-07-28'):
             try:
                 client = OpenAI(
                     api_key=api_key_list[key_idx],
-                    base_url='https://dashscope.aliyuncs.com/compatible-mode/v1' #  https://jeniya.cn/v1
+                    base_url=base_url
                 )
                 completion_res = client.chat.completions.create(
                     model=model_type,
@@ -189,9 +227,9 @@ def rag_query(query, documents, GPT_USE=True):
     return response
 
 
-def query_base(query, GPT_USE=True):
+def query_base(query, GPT_USE=True, llm_config=None, use_distribution_config=True):
     if GPT_USE:
-        response = get_ans_from_llm(f"{query}", api_use=True)
+        response = get_ans_from_llm(f"{query}", api_use=True, llm_config=llm_config, use_distribution_config=use_distribution_config)
     else:
         response = ''
     return response
