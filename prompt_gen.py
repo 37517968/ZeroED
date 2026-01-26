@@ -76,7 +76,8 @@ def error_check_prompt(col_values, col_name, expert_labeled_right_dict, expert_l
     prompt += "- Only mark a value as an error if you are confident it is incorrect.\n"
     prompt += "- Do NOT mark a value as an error solely because it is not present in examples.\n"
     prompt += "- Ignore the case sensitivity issues.\n"
-    prompt += "- Do not check for data type errors.\n\n"
+    prompt += "- Do not check for data type errors.\n"
+    prompt += "- **IMPORTANT for temporal data (dates, times, years, etc.)**: When evaluating date/time values, you MUST consider the context and use your knowledge to judge whether the value is reasonable. For example:\n"
     if col_name in expert_labeled_right_dict or col_name in expert_labeled_wrong_dict:
         prompt += f"Below are reference examples for analyzing the correctness of `{col_name}` values.\n"
         prompt += "**These examples illustrate patterns only. They are NOT an exhaustive list.**\n"
@@ -291,33 +292,6 @@ f"    # Value of `{attr_name}` is row[attr]\n"
 def guide_gen_prompt():
     return
 
-def distribution_analysis_decision_prompt(attr_name, cluster_center_values):
-    """
-    生成让LLM判断是否需要调用分布分析方法的prompt
-    
-    Args:
-        attr_name: 属性名称
-        cluster_center_values: 聚类中心的代表性值列表
-    """
-    values_str = '\n'.join([f"- {v}" for v in cluster_center_values])
-    
-    prompt = f"""You are a data quality expert. Below are representative values from the '{attr_name}' column that were obtained through clustering analysis.
-
-Representative values for column '{attr_name}':
-{values_str}
-
-These values represent different patterns found in the data. Your task is to determine whether you can confidently distinguish between correct and incorrect values.
-
-If you observe multiple distinct patterns in these values and you are uncertain which pattern(s) represent the correct/canonical form, you should request distribution analysis to help identify the dominant patterns.
-
-Question: Can you accurately distinguish correct values from incorrect values based on these representative samples? If there are multiple patterns that make you uncertain about which pattern is correct, you may choose to call the distribution analysis method.
-
-Please respond with ONLY 'yes' or 'no':
-- 'yes' means you need distribution analysis (multiple patterns exist and you're uncertain)
-- 'no' means you can confidently identify correct/incorrect values without distribution analysis
-"""
-    return prompt
-
 
 def canonical_pattern_analysis_prompt(attr_name, cluster_samples, cluster_id, canonical_score):
     """
@@ -343,7 +317,7 @@ Sample values from this cluster:
 Your task:
 1. Identify the common pattern shared by these values
 2. Describe the canonical/standard format for this pattern
-3. Provide a regex pattern (if applicable) that matches valid values
+3. Create a Python function that can check if a value matches this pattern
 4. List key characteristics that define this pattern
 
 Please respond in the following JSON format:
@@ -351,12 +325,23 @@ Please respond in the following JSON format:
 {{
     "pattern_name": "A short descriptive name for this pattern",
     "pattern_description": "Detailed description of the canonical pattern",
-    "regex_pattern": "Regular expression pattern (or 'N/A' if not applicable)",
+    "pattern_function": "def matches_pattern(value):\\n    # Python function code here\\n    # Return True if value matches this pattern, False otherwise\\n    return True",
     "key_characteristics": ["characteristic1", "characteristic2", ...],
     "example_valid_values": ["example1", "example2", ...],
     "common_errors": ["potential error type 1", "potential error type 2", ...]
 }}
 ```
+
+IMPORTANT: The pattern_function should be a complete Python function that:
+- Takes a single parameter 'value' (string)
+- Returns True if the value matches the pattern, False otherwise
+- Uses proper Python syntax with \\n for newlines
+- Handles edge cases (empty strings, None, etc.)
+- Is self-contained (no external dependencies except standard library like re, datetime, etc.)
+- Function name must be 'matches_pattern'
+
+Example pattern_function:
+"def matches_pattern(value):\\n    value = value.strip()\\n    # Check if value matches the pattern\\n    return len(value) > 0 and value.isdigit()"
 """
     return prompt
 
@@ -393,8 +378,7 @@ def error_check_with_canonical_prompt(col_values, col_name, expert_labeled_right
         for i, pattern in enumerate(canonical_patterns, 1):
             prompt += f"**Pattern {i}: {pattern.get('pattern_name', 'Unknown')}**\n"
             prompt += f"- Description: {pattern.get('pattern_description', 'N/A')}\n"
-            if pattern.get('regex_pattern') and pattern.get('regex_pattern') != 'N/A':
-                prompt += f"- Regex: `{pattern.get('regex_pattern')}`\n"
+            # 不在提示词中显示pattern_function，只显示描述和特征
             if pattern.get('key_characteristics'):
                 prompt += f"- Key characteristics: {', '.join(pattern.get('key_characteristics', []))}\n"
             prompt += "\n"
@@ -431,7 +415,8 @@ def error_check_with_canonical_prompt(col_values, col_name, expert_labeled_right
     prompt += "- Use the canonical patterns above as reference for identifying errors.\n"
     prompt += "- Do NOT mark a value as an error solely because it is not present in examples.\n"
     prompt += "- Ignore the case sensitivity issues.\n"
-    prompt += "- Do not check for data type errors.\n\n"
+    prompt += "- Do not check for data type errors.\n"
+    prompt += "- **IMPORTANT for temporal data (dates, times, years, etc.)**: When evaluating date/time values, you MUST consider the context and use your knowledge to judge whether the value is reasonable. "
     
     if col_name in expert_labeled_right_dict or col_name in expert_labeled_wrong_dict:
         prompt += f"Below are reference examples for analyzing the correctness of `{col_name}` values.\n"
@@ -545,81 +530,154 @@ Only respond with the JSON, no additional text.
     return prompt
 
 
-def error_pattern_incompatibility_prompt(attr_name, canonical_samples, error_candidate_samples):
+def error_pattern_incompatibility_prompt(attr_name, canonical_samples, error_candidate_samples, 
+                                        canonical_description=None, candidate_description=None):
     """
     生成让LLM评估错误候选模式与canonical模式对立程度的prompt
     
-    重点：只有格式明显对立才给高分，不确定的给中等分数
+    区分描述性列和格式类列：
+    - 描述性列：语义不同但都合理的表述可以共存，不兼容分数较低
+    - 格式类列：能表达相同语义但格式不一致，不兼容分数较高
     
     Args:
         attr_name: 属性名称
         canonical_samples: canonical模式的示例值列表（最多5个）
         error_candidate_samples: 错误候选模式的样本值列表（最多5个）
+        canonical_description: canonical模式的自然语言描述（可选）
+        candidate_description: 候选错误模式的自然语言描述（可选）
     """
     canonical_samples_str = '\n'.join([f'- "{s}"' for s in canonical_samples])
     candidate_samples_str = '\n'.join([f'- "{s}"' for s in error_candidate_samples])
     
-    prompt = f"""You are a data quality expert.
+    # 添加模式描述
+    canonical_desc_str = ""
+    if canonical_description:
+        canonical_desc_str = f"\nCanonical pattern description: {canonical_description}\n"
+    
+    candidate_desc_str = ""
+    if candidate_description:
+        candidate_desc_str = f"\nCandidate pattern description: {candidate_description}\n"
+    
+    prompt = f"""
+You are a data quality expert.
 
 Your task is to assign an INCOMPATIBILITY score (0.0–1.0) between a candidate pattern and the canonical pattern for column "{attr_name}".
 
-Follow this STRICT decision order:
+The score reflects how UNLIKELY these two patterns are to COEXIST in the SAME column.
 
 ---
 
-STEP 1: Candidate Plausibility Check 
+Canonical Pattern:
+{canonical_desc_str}
+Examples:
+{canonical_samples_str}
 
-First, look ONLY at the candidate samples below.
-Decide whether these values could reasonably be CORRECT values for the given column.
-
-If the candidate values are OBVIOUSLY WRONG or INVALID for this column:
-→ Assign a HIGH score (≥ 0.9).
-→ STOP and return the score.
-
-Candidate samples:
+Candidate Pattern:
+{candidate_desc_str}
+Examples:
 {candidate_samples_str}
 
 ---
 
-STEP 2: Compatibility with Canonical Pattern (MOST IMPORTANT)
+Scoring Principles (IMPORTANT):
 
-Only if the candidate values are PLAUSIBLE, compare them with the canonical pattern samples.
+1. Core Question:
+Can these two patterns reasonably appear together in the same dataset column?
 
-Canonical pattern samples (reference examples):
-{canonical_samples_str}
+2. High Incompatibility (0.8–1.0):
+Assign ONLY if at least one is true:
+- The candidate pattern is clearly erroneous or malformed.
+- The two patterns are similar but with incompatible FORMAT conventions.
+- Their coexistence in one column is very unlikely.
+Examples:
+- "12.0 oz" vs "12.0 oz."
+- "0.5" vs "0.5%"
+- String vs String+unit
 
-Apply the following rules:
+3. Medium Incompatibility (0.3–0.5):
+Assign if:
+- Both patterns are plausible values in the same column.
+- They differ semantically but could coexist.
+- Format differences may be acceptable or unconstrained.
+- You are NOT confident the candidate is wrong.
+Examples:
+- Different beer styles or names
+- Different ID lengths
+- Different numeric precision
+- There maybe 'X' at the end of journal_issn.
+- "Jan-68" may also be a correct journal_issn.
 
-A. STRING / DESCRIPTIVE columns:
-- Multiple formats or expressions may all be valid.
-    - Examples: "American IPA" vs "American Pale Ale (APA)" vs "Cider", "Pub Beer" vs "14° ESB"
-- If the candidate and canonical could reasonably appear together in the same table:
-  → Score MUST be in [0.3, 0.5].
-- NEVER assign scores > 0.5 for DESCRIPTIVE columns unless values are clearly malformed.
-
-B. NUMERIC + UNIT columns:
-- Focus on FORMAT consistency, not semantic similarity.
-- Clear format conflicts (punctuation, unit symbols, structure differences) justify HIGH scores(≥ 0.9):
-  - Examples: "12.0 oz" vs "12.0 oz.", "0.5" vs "0.5%", "eng" vs "English"
-  → Score may be in [0.9, 1.0].
-
-- If numeric precision, digit length, or decimal places are unconstrained
-  (e.g., IDs with varying digits, 0.06 vs 0.065):
-  → Score MUST be in [0.3, 0.5].
-
----
-
-SCORING CONSTRAINTS (MANDATORY):
-
-- Scores > 0.9 ONLY for obvious FORMAT incompatibility.
-- Uncertainty ALWAYS maps to [0.3, 0.5].
-- If you cannot be certain the candidate is wrong, DO NOT assign a low or high score.
+4. Uncertainty Rule:
+If you are unsure, ALWAYS assign a score in [0.3, 0.5].
 
 ---
 
 Return ONLY a single decimal number between 0.0 and 1.0.
-Do NOT include explanations.
-
+Do NOT provide explanations.
 """
+
     return prompt
 
+
+
+def generate_cluster_descriptions_prompt(attr_name, clusters_with_samples):
+    """
+    生成让LLM为多个聚类生成自然语言描述的prompt
+    
+    Args:
+        attr_name: 属性名称
+        clusters_with_samples: 列表，每个元素是 (cluster_idx, sample_values, cluster_size)
+    
+    Returns:
+        prompt: 提示词字符串
+    """
+    clusters_str = ""
+    for i, (cluster_idx, samples, cluster_size) in enumerate(clusters_with_samples, 1):
+        # 格式化样本展示（最多5个不同的样本）
+        if len(samples) == 0:
+            samples_str = "(no samples)"
+        else:
+            samples_str = '\n    '.join([f'- "{s}"' for s in samples])
+        
+        clusters_str += f"\n**Cluster {i}** (ID: {cluster_idx}, Size: {cluster_size}):\n"
+        clusters_str += f"  Sample values:\n    {samples_str}\n"
+    
+    prompt = f"""You are a data quality expert specializing in pattern recognition. Analyze the following clusters of values from the '{attr_name}' column.
+
+{clusters_str}
+
+Your task:
+1. For EACH cluster, identify and describe the common pattern/characteristic shared by its values
+2. Compare the clusters to understand their differences
+3. Provide a concise natural language description for each cluster that captures its key features
+
+The descriptions should:
+- Be clear and specific (e.g., "Numeric values with 'oz' unit suffix" rather than "Values with units")
+- Highlight distinguishing features (e.g., "Ends with period" vs "No period")
+- Focus on format/structure rather than semantic meaning
+- Be suitable for later comparison to identify canonical vs error patterns
+
+Please respond in the following JSON format:
+```json
+{{
+  "cluster_1": {{
+    "cluster_id": {clusters_with_samples[0][0] if clusters_with_samples else 0},
+    "description": "Natural language description of the pattern"
+  }},
+  "cluster_2": {{
+    "cluster_id": {clusters_with_samples[1][0] if len(clusters_with_samples) > 1 else 0},
+    "description": "Natural language description of the pattern"
+  }},
+  ...
+}}
+```
+
+IMPORTANT:
+- Provide descriptions for ALL {len(clusters_with_samples)} clusters
+- Keep descriptions concise (1-2 sentences)
+- Focus on observable patterns, not interpretations
+- Use the cluster_id from the input
+
+Only respond with the JSON, no additional text.
+"""
+    return prompt
