@@ -30,11 +30,13 @@ from prompt_gen import (create_err_gen_inst_prompt, err_clean_func_prompt,
                         create_clean_gen_inst_prompt, create_dirty_gen_inst_prompt,
                         guide_gen_prompt, canonical_pattern_analysis_prompt, error_check_with_canonical_prompt,
                         llm_canonicality_score_prompt, llm_compare_patterns_canonicality_prompt,
-                        generate_cluster_descriptions_prompt, error_pattern_incompatibility_prompt
+                        generate_cluster_descriptions_prompt, error_pattern_incompatibility_prompt,
+                        pattern_function_generation_prompt
                         )
 from utility import (Logger, Timer, copy_file,
                      default_dict_of_lists, get_ans_from_llm, query_base,
-                     rag_query, split_list_to_sublists)
+                     rag_query, split_list_to_sublists,
+                     set_distribution_analysis_llm_config, set_annotation_llm_config)
 
 # 全局变量：记录分布分析过程中的所有prompts
 _distribution_analysis_prompts = {}
@@ -62,12 +64,6 @@ def ensure_dir(path):
 
 
 
-def sigmoid(x):
-    """Sigmoid函数"""
-    return 1 / (1 + np.exp(-np.clip(x, -500, 500)))
-
-
-# ==================== 分布分析方法相关函数 ====================
 
 def get_single_column_features(dirty_csv, col_num, col_name):
     """
@@ -504,79 +500,166 @@ def get_cluster_pattern_description(cluster_values):
 
 
 
-def validate_and_test_function(function_code, test_values, min_pass_rate=0.9):
-    """验证生成的函数是否有效"""
+def validate_function(function_code, test_values, 
+                     validation_type='canonical',
+                     canonical_values=None,
+                     min_pass_rate=0.8,
+                     min_error_pass_rate=0.6,
+                     max_canonical_pass_rate=0.2):
+    """
+    统一的函数验证逻辑
+    
+    Args:
+        function_code: 函数代码
+        test_values: 主要测试值（canonical函数用canonical值，error函数用error值）
+        validation_type: 验证类型 'canonical' 或 'error'
+        canonical_values: canonical模式的值（仅用于error函数验证）
+        min_pass_rate: canonical函数的最小通过率（默认0.8）
+        min_error_pass_rate: error函数在error值上的最小通过率（默认0.6）
+        max_canonical_pass_rate: error函数在canonical值上的最大通过率（默认0.2）
+    
+    Returns:
+        对于canonical函数: (is_valid, pass_rate)
+        对于error函数: (is_valid, error_pass_rate, canonical_pass_rate)
+    """
     if not function_code or 'def matches_pattern' not in function_code:
+        if validation_type == 'error':
+            return False, 0.0, 0.0
         return False, 0.0
     
     # 检查是否只是简单返回False
-    lines = [line.strip() for line in function_code.split('\n') 
+    code_lines = [line.strip() for line in function_code.split('\n') 
              if line.strip() and not line.strip().startswith('#')]
-    if len(lines) == 2 and 'return False' in lines[-1]:
+    if len(code_lines) == 2 and 'return False' in code_lines[-1]:
+        if validation_type == 'error':
+            return False, 0.0, 0.0
         return False, 0.0
     
-    # 测试函数是否能正确匹配测试值
-    if test_values:
-        try:
-            local_namespace = {}
-            exec(function_code, {}, local_namespace)
-            matches_pattern = local_namespace.get('matches_pattern')
-            
-            if matches_pattern and callable(matches_pattern):
-                passed = sum(1 for v in test_values if matches_pattern(str(v).strip()))
-                pass_rate = passed / len(test_values)
-                return pass_rate >= min_pass_rate, pass_rate
-        except Exception:
+    try:
+        # 提供常用模块给exec环境
+        import re
+        import datetime
+        import string
+        global_namespace = {
+            're': re,
+            'datetime': datetime,
+            'string': string,
+            '__builtins__': __builtins__
+        }
+        local_namespace = {}
+        exec(function_code, global_namespace, local_namespace)
+        matches_pattern = local_namespace.get('matches_pattern')
+        
+        if not matches_pattern or not callable(matches_pattern):
+            if validation_type == 'error':
+                return False, 0.0, 0.0
             return False, 0.0
-    
-    return True, 1.0
+        
+        if validation_type == 'canonical':
+            # Canonical函数验证：只需在canonical值上达到通过率
+            if test_values:
+                passed = 0
+                total = min(len(test_values), 100)
+                for v in test_values[:total]:
+                    try:
+                        if matches_pattern(str(v).strip()):
+                            passed += 1
+                    except:
+                        pass
+                pass_rate = passed / total if total > 0 else 0.0
+                is_valid = pass_rate >= min_pass_rate
+                return is_valid, pass_rate
+            return True, 1.0
+            
+        elif validation_type == 'error':
+            # Error函数验证：需要双重验证
+            # 1. 在error值上的通过率
+            error_passed = 0
+            error_total = min(len(test_values), 100)
+            for v in test_values[:error_total]:
+                try:
+                    if matches_pattern(str(v).strip()):
+                        error_passed += 1
+                except:
+                    pass
+            error_pass_rate = error_passed / error_total if error_total > 0 else 0.0
+            
+            # 2. 在canonical值上的通过率
+            canonical_passed = 0
+            canonical_total = 0
+            if canonical_values:
+                canonical_total = min(len(canonical_values), 100)
+                for v in canonical_values[:canonical_total]:
+                    try:
+                        if matches_pattern(str(v).strip()):
+                            canonical_passed += 1
+                    except:
+                        pass
+            canonical_pass_rate = canonical_passed / canonical_total if canonical_total > 0 else 0.0
+            
+            # 验证是否满足双重条件
+            is_valid = (error_pass_rate >= min_error_pass_rate and 
+                       canonical_pass_rate <= max_canonical_pass_rate)
+            
+            return is_valid, error_pass_rate, canonical_pass_rate
+        
+    except Exception as e:
+        if validation_type == 'error':
+            return False, 0.0, 0.0
+        return False, 0.0
 
-# TODO 提示词写在prompt_gen.py中
+
+# 为了向后兼容，保留旧的函数名作为包装器
+def validate_and_test_function(function_code, test_values, min_pass_rate=0.8):
+    """验证canonical函数（向后兼容）"""
+    return validate_function(function_code, test_values, 
+                           validation_type='canonical',
+                           min_pass_rate=min_pass_rate)
+
+
+def validate_error_function(function_code, error_values, canonical_values, 
+                           min_error_pass_rate=0.6, max_canonical_pass_rate=0.2):
+    """验证error函数（向后兼容）"""
+    return validate_function(function_code, error_values,
+                           validation_type='error',
+                           canonical_values=canonical_values,
+                           min_error_pass_rate=min_error_pass_rate,
+                           max_canonical_pass_rate=max_canonical_pass_rate)
+
+
 def generate_and_validate_function(sample_values, cluster_description, attr_name=None, 
-                                   save_dir=None, cluster_id=None, all_cluster_values=None):
+                                   save_dir=None, cluster_id=None, all_cluster_values=None, logger=None,
+                                   is_error_function=False, canonical_values=None):
     """生成并验证模式匹配函数"""
     import os
     from utility import get_ans_from_llm
     
+    def log_info(msg):
+        if logger:
+            logger.info(msg)
+        else:
+            print(msg)
+    
+    def log_warning(msg):
+        if logger:
+            logger.warning(msg)
+        else:
+            print(f"WARNING: {msg}")
+    
     if not sample_values or len(sample_values) == 0:
+        log_warning(f"[函数生成] 聚类{cluster_id}: 样本值为空，跳过")
         return None
     
     samples_to_use = sample_values[:10] if len(sample_values) > 10 else sample_values
-    samples_str = '\n'.join([f'- "{s}"' for s in samples_to_use])
+    log_info(f"[函数生成] 聚类{cluster_id}: 开始生成函数，样本数={len(samples_to_use)}")
     
-    prompt = f"""You are a data quality expert. Generate a Python function to validate if a value matches the following pattern.
-
-Column: '{attr_name if attr_name else "unknown"}'
-Pattern Description: {cluster_description}
-
-Sample values from this pattern:
-{samples_str}
-
-Your task:
-Generate a Python function named 'matches_pattern' that:
-1. Takes a single parameter 'value' (string)
-2. Returns True if the value matches this pattern, False otherwise
-3. Handles edge cases (empty strings, None, etc.)
-4. Is self-contained (only use standard library like re, datetime, etc.)
-
-IMPORTANT:
-- The function should be able to correctly validate at least 90% of values in this cluster
-- Focus on the key characteristics described in the pattern description
-- Be neither too strict nor too loose
-- Return ONLY the Python function code, no explanations or markdown
-- DO NOT just return "def matches_pattern(value): return False" - implement actual validation logic
-
-Example output format:
-def matches_pattern(value):
-    if not value or not isinstance(value, str):
-        return False
-    value = value.strip()
-    # Your validation logic here
-    return True
-"""
+    # 使用prompt_gen.py中的函数生成提示词
+    prompt = pattern_function_generation_prompt(attr_name, cluster_description, samples_to_use)
+    log_info(f"[函数生成] 聚类{cluster_id}: 提示词长度={len(prompt)}")
     
     try:
-        response = get_ans_from_llm(prompt)
+        response = get_ans_from_llm(prompt, use_distribution_config=False)  # 使用注释LLM
+        log_info(f"[函数生成] 聚类{cluster_id}: LLM响应长度={len(response) if response else 0}")
         
         if save_dir and attr_name and cluster_id is not None:
             response_file = os.path.join(save_dir, f"cluster_{cluster_id}_function_generation.txt")
@@ -584,38 +667,75 @@ def matches_pattern(value):
             with open(response_file, 'w', encoding='utf-8') as f:
                 f.write(f"=== Prompt ===\n{prompt}\n\n")
                 f.write(f"=== Response ===\n{response}\n")
+            log_info(f"[函数生成] 聚类{cluster_id}: 已保存响应到 {response_file}")
         
         if not response:
-            print(f"Warning: LLM returned empty response for cluster {cluster_id}")
+            log_warning(f"[函数生成] 聚类{cluster_id}: LLM返回空响应")
             return None
         
         function_code = response.strip()
+        log_info(f"[函数生成] 聚类{cluster_id}: 原始响应前100字符: {function_code[:100]}")
         
         if function_code.startswith('```python'):
             function_code = function_code[len('```python'):].strip()
+            log_info(f"[函数生成] 聚类{cluster_id}: 移除了```python标记")
         elif function_code.startswith('```'):
             function_code = function_code[len('```'):].strip()
+            log_info(f"[函数生成] 聚类{cluster_id}: 移除了```标记")
         
         if function_code.endswith('```'):
             function_code = function_code[:-len('```')].strip()
+            log_info(f"[函数生成] 聚类{cluster_id}: 移除了结尾```标记")
+        
+        log_info(f"[函数生成] 聚类{cluster_id}: 提取后的函数代码长度={len(function_code)}")
+        log_info(f"[函数生成] 聚类{cluster_id}: 提取后的函数代码前200字符:\n{function_code[:200]}")
         
         test_values = all_cluster_values if all_cluster_values else sample_values
-        is_valid, pass_rate = validate_and_test_function(function_code, test_values)
+        log_info(f"[函数生成] 聚类{cluster_id}: 开始验证函数，测试值数量={len(test_values)}")
         
-        if not is_valid:
-            print(f"Warning: Generated function failed validation for cluster {cluster_id} (pass_rate={pass_rate:.2%})")
-            return None
+        if is_error_function and canonical_values is not None:
+            # Error函数验证：需要双重验证
+            is_valid, error_rate, canonical_rate = validate_function(
+                function_code, test_values,
+                validation_type='error',
+                canonical_values=canonical_values,
+                min_error_pass_rate=0.6,
+                max_canonical_pass_rate=0.2
+            )
+            log_info(f"[函数生成] 聚类{cluster_id}: Error函数验证结果 is_valid={is_valid}")
+            log_info(f"[函数生成] 聚类{cluster_id}: error通过率={error_rate:.2%}, canonical通过率={canonical_rate:.2%}")
+            
+            if not is_valid:
+                log_warning(f"[函数生成] 聚类{cluster_id}: Error函数验证失败")
+                log_warning(f"[函数生成] 聚类{cluster_id}: 要求: error>=60%, canonical<=20%")
+                log_info(f"[函数生成] 聚类{cluster_id}: 失败的函数代码:\n{function_code}")
+                return None
+            
+            log_info(f"[函数生成] 聚类{cluster_id}: ✓ Error函数验证通过")
+        else:
+            # Canonical函数验证：只需在canonical值上达到通过率
+            is_valid, pass_rate = validate_function(
+                function_code, test_values,
+                validation_type='canonical',
+                min_pass_rate=0.8
+            )
+            log_info(f"[函数生成] 聚类{cluster_id}: 验证结果 is_valid={is_valid}, pass_rate={pass_rate:.2%}")
+            
+            if not is_valid:
+                log_warning(f"[函数生成] 聚类{cluster_id}: 函数验证失败 (pass_rate={pass_rate:.2%})")
+                log_info(f"[函数生成] 聚类{cluster_id}: 失败的函数代码:\n{function_code}")
+                return None
+            
+            log_info(f"[函数生成] 聚类{cluster_id}: ✓ 函数验证通过 (pass_rate={pass_rate:.2%})")
         
-        print(f"Generated function for cluster {cluster_id} passed validation (pass_rate={pass_rate:.2%})")
+        log_info(f"[函数生成] 聚类{cluster_id}: 返回的函数代码长度={len(function_code)}")
         return function_code
         
     except Exception as e:
-        print(f"Error generating pattern function for cluster {cluster_id}: {e}")
+        log_warning(f"[函数生成] 聚类{cluster_id}: 生成函数时出错: {e}")
+        import traceback
+        log_warning(f"[函数生成] 聚类{cluster_id}: 错误堆栈:\n{traceback.format_exc()}")
         return None
-
-
-
-
 
 
 
@@ -634,16 +754,6 @@ def find_common_prefix(strings):
     return prefix
 
 
-def find_common_suffix(strings):
-    """找到字符串列表的公共后缀"""
-    if not strings:
-        return ""
-    
-    # 反转字符串找前缀，然后再反转回来
-    reversed_strings = [s[::-1] for s in strings]
-    reversed_suffix = find_common_prefix(reversed_strings)
-    
-    return reversed_suffix[::-1]
 
 def select_diverse_samples(cluster_values, max_samples=3):
     """
@@ -1010,29 +1120,6 @@ def perform_distribution_analysis(dirty_csv, col_num, col_name, config, logger):
     return analysis_result
 
 
-def ask_llm_for_distribution_analysis(attr_name, center_values, logger):
-    """询问LLM是否需要分布分析"""
-    prompt = distribution_analysis_decision_prompt(attr_name, center_values)
-    
-    try:
-        response = query_base(prompt)
-        response = response.strip().lower()
-        
-        logger.info(f"列 '{attr_name}' LLM分布分析决策响应: {response}")
-        
-        if 'yes' in response:
-            return True
-        elif 'no' in response:
-            return False
-        else:
-            logger.warning(f"列 '{attr_name}' LLM响应无法解析，默认不使用分布分析")
-            return False
-    except Exception as e:
-        logger.error(f"询问LLM分布分析决策时出错: {str(e)}")
-        return False
-
-
-# error函数识别相关函数
 
 def parse_llm_score(response):
     """解析LLM返回的分数（0-1或0-100）"""
@@ -1140,9 +1227,15 @@ def identify_error_patterns(analysis_result, dirty_csv, logger,
                 # 使用LLM生成的聚类描述
                 pattern_desc = cluster_descriptions.get(idx, get_cluster_pattern_description(values))
                 
-                # 生成Python函数用于精确匹配
-                pattern_func = generate_and_validate_function(sample_values, cluster_description, attr_name, 
-                                         save_dir, cluster_id, all_cluster_values=None)
+                # 生成Python函数用于精确匹配（自动进行error函数双重验证）
+                pattern_func = generate_and_validate_function(
+                    error_samples, pattern_desc, col_name, 
+                    save_dir, idx, 
+                    all_cluster_values=values, 
+                    logger=logger,
+                    is_error_function=True,
+                    canonical_values=canonical_cluster_values
+                )
                 
                 error_pattern = {
                     'cluster_id': idx,
@@ -1336,7 +1429,8 @@ def analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger, resp
                     col_name,
                     save_dir=save_dir,
                     cluster_id=idx,
-                    all_cluster_values=cluster_values[idx]
+                    all_cluster_values=cluster_values[idx],
+                    logger=logger
                 )
                 if auto_func:
                     pattern['pattern_function'] = auto_func
@@ -1615,7 +1709,7 @@ def process_distribution_analysis_for_all_columns(dirty_csv, all_attrs, config, 
         distribution_analysis_results[attr] = analysis_result
         
         # 分析canonical簇的canonical函数
-        canonical_patterns = analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger)
+        canonical_patterns = analyze_canonical_patterns_with_llm(analysis_result, dirty_csv, logger, resp_path=resp_path)
         canonical_patterns_dict[attr] = canonical_patterns
         
         logger.info(f"列 '{attr}' 分析完成，识别出 {len(canonical_patterns)} 个canonical函数")
@@ -1693,6 +1787,35 @@ def convert_label_history_to_train_data(index_value_label_history, dirty_csv, re
                     train_data_dict[attr]['right'].append((idx, value))
     
     return train_data_dict, final_labels
+
+
+def fix_error_flags(response):
+    """
+    修复LLM响应中的错误标志格式问题
+    
+    常见问题：
+    1. true/false 大小写不一致
+    2. 缺少引号
+    3. 格式不规范
+    
+    Args:
+        response: LLM的原始响应
+    
+    Returns:
+        修复后的响应
+    """
+    import re
+    
+    # 修复 true/false 的大小写问题
+    # 将 True/TRUE 替换为 true
+    response = re.sub(r':\s*True', ': true', response)
+    response = re.sub(r':\s*TRUE', ': true', response)
+    
+    # 将 False/FALSE 替换为 false
+    response = re.sub(r':\s*False', ': false', response)
+    response = re.sub(r':\s*FALSE', ': false', response)
+    
+    return response
 
 
 def llm_label_indices(attr_name, indices, dirty_csv, clean_csv, related_attrs_dict, 
@@ -1875,6 +1998,45 @@ def llm_label_indices(attr_name, indices, dirty_csv, clean_csv, related_attrs_di
     return current_labels
 
 
+def normalize_string(s):
+    """
+    规范化字符串用于匹配
+    
+    处理：
+    1. 去除多余空格
+    2. 统一引号
+    3. 规范化标点符号
+    
+    Args:
+        s: 输入字符串
+    
+    Returns:
+        规范化后的字符串
+    """
+    if not isinstance(s, str):
+        s = str(s)
+    
+    # 去除首尾空格
+    s = s.strip()
+    
+    # 统一引号：将双引号替换为单引号
+    s = s.replace('"', "'")
+    
+    # 规范化空格：多个空格替换为单个空格
+    import re
+    s = re.sub(r'\s+', ' ', s)
+    
+    # 规范化逗号后的空格
+    s = s.replace(',', ', ')
+    s = s.replace(',  ', ', ')
+    
+    # 规范化冒号后的空格
+    s = s.replace(':', ': ')
+    s = s.replace(':  ', ': ')
+    
+    return s
+
+
 def extract_labels_from_responses(attr_name, responses_with_indices, dirty_csv, related_attrs_dict):
     """从LLM响应中提取标注结果"""
     index_value_label_dict = defaultdict(list)
@@ -1886,8 +2048,6 @@ def extract_labels_from_responses(attr_name, responses_with_indices, dirty_csv, 
     for response, indices in responses_with_indices:
         resp_content = response.replace('\\+', '').replace('\\n', '\n')
         
-        wrong_pattern = err_pat_in_text_attr(attr_name)
-        right_pattern = right_pat_in_text_attr(attr_name)
         
         # 新增：提取带有error_analysis的完整模式，用于检查是否需要过滤
         # 匹配格式: "value_row": "...", "error_analysis": "...", "has_error_in_xxx_value": true/false
@@ -1928,100 +2088,6 @@ def extract_labels_from_responses(attr_name, responses_with_indices, dirty_csv, 
     
     return index_value_label_dict
 
-
-def extract_func(text_content):
-    # 确保text_content是字符串类型
-    if text_content is None:
-        return [], []
-    if not isinstance(text_content, str):
-        try:
-            text_content = str(text_content)
-        except Exception as e:
-            print(f"Cannot convert text_content to string: {e}")
-            return [], []
-    
-    try:
-        code_blocks = re.findall(r'```(.*?)```', text_content, re.DOTALL)
-    except (re.error, TypeError) as e:
-        print(f"Regex error: {e}")
-        return [], []
-    clean_func_list = []
-    dirty_func_list = []
-    for code_block in code_blocks:
-        functions = re.findall(r'def \w+\(.*?\):\n(?:[ \t]*\n)*(?: .*\n)+', code_block)
-        for function in functions:
-            try:
-                function_name = re.findall(r'def (\w+)', function)[0]
-            except IndexError:
-                continue
-            if 'is_clean' in function_name:
-                clean_func_list.append(function)
-            elif 'is_dirty' in function_name:
-                dirty_func_list.append(function)
-    return clean_func_list, dirty_func_list
-
-
-funcs_with_errors = set()
-
-def fix_error_flags(response_str):
-    lines = response_str.splitlines()
-    fixed_lines = lines.copy()
-    for i in range(len(lines) - 1):
-        line1 = lines[i]
-        line2 = lines[i + 1]
-        if '"error_analysis"' in line1 and re.search(r'not match|duplicate', line1, re.IGNORECASE):
-            if re.search(r'"has_error_in_[^"]+"\s*:\s*true', line2, re.IGNORECASE):
-                fixed_lines[i + 1] = re.sub(r'\btrue\b', 'false', line2, flags=re.IGNORECASE)
-    return "\n".join(fixed_lines)
-
-
-def normalize_string(s):
-    return str(s.replace(" \\", "\\")
-               .replace("\\\\", "\\")
-               .replace("\\", "")
-               .replace(", ", ",")
-               .replace(": ", ":")
-               .replace("'", '"'))
-
-
-# 简化版的特征生成函数（不使用预函数和函数特征）
-
-def process_attr_train_feat_simplified(attr, dirty_csv, train_data_dict, related_attrs_dict, 
-                                       resp_path, canonical_patterns=None, error_patterns=None):
-    """
-    处理属性的训练特征（简化版，不使用函数特征）
-    
-    特征包括：
-    1. FastText词向量
-    2. canonical函数相似度（如果有）
-    """
-    fasttext_model = fasttext.load_model('./cc.en.300.bin')
-    fasttext_dimension = len(dirty_csv.columns)
-    fasttext.util.reduce_model(fasttext_model, fasttext_dimension)
-    
-    feature_list = []
-    label_list = []
-    related_attrs = list(related_attrs_dict[attr])
-    
-    # 从train_data_dict获取训练数据
-    right_samples = train_data_dict.get(attr, {}).get('right', [])
-    wrong_samples = train_data_dict.get(attr, {}).get('wrong', [])
-    
-    for idx, val in tqdm(right_samples, ncols=120, desc=f"Processing {attr} right values"):
-        feature = single_val_feat_simplified(val, fasttext_model, attr, 
-                                            list(dirty_csv.columns), canonical_patterns, error_patterns)
-        if feature:
-            feature_list.append(feature)
-            label_list.append(0)
-    
-    for idx, val in tqdm(wrong_samples, ncols=120, desc=f"Processing {attr} wrong values"):
-        feature = single_val_feat_simplified(val, fasttext_model, attr, 
-                                            list(dirty_csv.columns), canonical_patterns, error_patterns)
-        if feature:
-            feature_list.append(feature)
-            label_list.append(1)
-    
-    return attr, feature_list, label_list
 
 
 def single_val_feat_simplified(val, fasttext_m, attr, all_attrs, canonical_patterns=None, error_patterns=None):
@@ -2157,6 +2223,159 @@ def process_attr_train_feat(attr, dirty_csv, train_data_dict, related_attrs_dict
     
     return attr, feature_list, label_list
 
+
+
+
+def process_attr_train_feat_simplified(attr, dirty_csv, train_data_dict, related_attrs_dict,
+                                      resp_path, canonical_patterns=None, error_patterns=None):
+    """
+    处理属性的训练特征（简化版本，不需要funcs_for_attr和feature_all_dict）
+    
+    Args:
+        attr: 属性名
+        dirty_csv: 脏数据DataFrame
+        train_data_dict: 训练数据字典
+        related_attrs_dict: 相关属性字典
+        resp_path: 响应路径
+        canonical_patterns: canonical函数列表
+        error_patterns: error函数列表
+    
+    Returns:
+        attr_name, feature_list, label_list
+    """
+    import fasttext
+    import fasttext.util
+    from tqdm import tqdm
+    
+    # 加载fasttext模型
+    fasttext_model = fasttext.load_model('./cc.en.300.bin')
+    fasttext_dimension = len(dirty_csv.columns)
+    fasttext.util.reduce_model(fasttext_model, fasttext_dimension)
+    
+    feature_list = []
+    label_list = []
+    related_attrs = list(related_attrs_dict[attr])
+    
+    # 从train_data_dict获取训练数据
+    right_samples = train_data_dict.get(attr, {}).get('right', [])
+    wrong_samples = train_data_dict.get(attr, {}).get('wrong', [])
+    
+    # 处理正确样本
+    for idx, val in tqdm(right_samples, ncols=120, desc=f"Processing {attr} right values"):
+        feature = single_val_feat_simplified(
+            val, fasttext_model, attr, dirty_csv.columns,
+            canonical_patterns=canonical_patterns,
+            error_patterns=error_patterns
+        )
+        if feature:
+            feature_list.append(feature)
+            label_list.append(0)
+    
+    # 处理错误样本
+    for idx, val in tqdm(wrong_samples, ncols=120, desc=f"Processing {attr} wrong values"):
+        feature = single_val_feat_simplified(
+            val, fasttext_model, attr, dirty_csv.columns,
+            canonical_patterns=canonical_patterns,
+            error_patterns=error_patterns
+        )
+        if feature:
+            feature_list.append(feature)
+            label_list.append(1)
+    
+    return attr, feature_list, label_list
+
+
+def single_val_feat_simplified(val, fasttext_model, attr, all_columns,
+                               canonical_patterns=None, error_patterns=None):
+    """
+    为单个值生成特征（简化版本）
+    
+    Args:
+        val: 值（可能是字典）
+        fasttext_model: fasttext模型
+        attr: 属性名
+        all_columns: 所有列名
+        canonical_patterns: canonical函数列表
+        error_patterns: error函数列表
+    
+    Returns:
+        特征向量
+    """
+    feature = []
+    
+    # 1. Canonical函数特征
+    if canonical_patterns:
+        for pattern in canonical_patterns:
+            pattern_func = pattern.get('pattern_function')
+            if pattern_func and pattern_func != 'N/A':
+                try:
+                    local_namespace = {}
+                    import re, datetime, string
+                    global_namespace = {
+                        're': re,
+                        'datetime': datetime,
+                        'string': string,
+                        '__builtins__': __builtins__
+                    }
+                    exec(pattern_func, global_namespace, local_namespace)
+                    matches_pattern = local_namespace.get('matches_pattern')
+                    
+                    if matches_pattern and callable(matches_pattern):
+                        # 如果val是字典，提取attr对应的值
+                        test_val = val.get(attr) if isinstance(val, dict) else val
+                        result = 1 if matches_pattern(str(test_val)) else 0
+                        feature.append(result)
+                    else:
+                        feature.append(0)
+                except:
+                    feature.append(0)
+            else:
+                feature.append(0)
+    
+    # 2. Error函数特征
+    if error_patterns:
+        for pattern in error_patterns:
+            pattern_func = pattern.get('pattern_function')
+            if pattern_func and pattern_func != 'N/A':
+                try:
+                    local_namespace = {}
+                    import re, datetime, string
+                    global_namespace = {
+                        're': re,
+                        'datetime': datetime,
+                        'string': string,
+                        '__builtins__': __builtins__
+                    }
+                    exec(pattern_func, global_namespace, local_namespace)
+                    matches_pattern = local_namespace.get('matches_pattern')
+                    
+                    if matches_pattern and callable(matches_pattern):
+                        test_val = val.get(attr) if isinstance(val, dict) else val
+                        result = 1 if matches_pattern(str(test_val)) else 0
+                        feature.append(result)
+                    else:
+                        feature.append(0)
+                except:
+                    feature.append(0)
+            else:
+                feature.append(0)
+    
+    # 3. Fasttext特征
+    if fasttext_model is not None:
+        if isinstance(val, dict):
+            # 如果是字典，连接所有值
+            text = ' '.join(str(v) for v in val.values())
+        else:
+            text = str(val)
+        
+        try:
+            vec = fasttext_model.get_sentence_vector(text)
+            feature.extend(vec.tolist())
+        except:
+            # 如果失败，添加零向量
+            feature.extend([0.0] * fasttext_model.get_dimension())
+    
+    return feature if feature else None
 
 def single_val_feat(val, fasttext_m, funcs_for_attr, attr, idx, all_attrs, feature_all_dict, resp_path, canonical_patterns=None):
     feature = []
@@ -2362,27 +2581,6 @@ def process_cluster(CLUSTER_RATE, dataset, resp_path, dirty_csv, all_attrs, rela
     return cluster_index_dict, center_value_dict, feature_all_dict
 
 
-def calculate_jsd(p, q):
-    """计算Jensen-Shannon Divergence"""
-    p = np.asarray(p, dtype=np.float64)
-    q = np.asarray(q, dtype=np.float64)
-    p = p / np.sum(p)
-    q = q / np.sum(q)
-    p = np.where(p == 0, 1e-10, p)
-    q = np.where(q == 0, 1e-10, q)
-    m = 0.5 * (p + q)
-    kl_pm = np.sum(p * np.log(p / m))
-    kl_qm = np.sum(q * np.log(q / m))
-    jsd = 0.5 * (kl_pm + kl_qm)
-    return jsd
-
-
-def calculate_ksd(sample1, sample2):
-    """计算Kolmogorov-Smirnov Distance"""
-    sample1 = np.asarray(sample1)
-    sample2 = np.asarray(sample2)
-    ks_statistic, p_value = stats.ks_2samp(sample1, sample2)
-    return ks_statistic
 
 
 def err_pat_in_text_attr(attr):
@@ -2394,14 +2592,6 @@ def right_pat_in_text_attr(attr):
     pattern = fr'"value_row":\s*(".*?"),\s*\n\s*"error_analysis":\s*"[^"]*",\s*\n\s*"has_error_in_{attr}_value":\s*false'
     return pattern
 
-
-def save_label_dict(index_value_label_dict, save_path):
-    """将标注结果保存到文件"""
-    with open(save_path, 'a', encoding='utf-8') as f:
-        for attr, items in index_value_label_dict.items():
-            for idx, value, label in items:
-                rec = {"attr": attr, "idx": int(idx), "value": value, "label": label}
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
 def save_mlp_prediction_errors(dirty_csv, clean_csv, det_wrong_list_res, all_attrs, resp_path):
@@ -2546,6 +2736,14 @@ if __name__ == "__main__":
         'beta': 0.3,
         'gamma': 0.3
     })
+    
+    # LLM配置 - 设置全局配置
+    DISTRIBUTION_ANALYSIS_LLM_CONFIG = config['model'].get('distribution_analysis_llm', None)
+    ANNOTATION_LLM_CONFIG = config['model'].get('annotation_llm', None)
+    
+    # 设置全局LLM配置
+    set_distribution_analysis_llm_config(DISTRIBUTION_ANALYSIS_LLM_CONFIG)
+    set_annotation_llm_config(ANNOTATION_LLM_CONFIG)
     # Dataset settings
     base_dir = config['data']['base_dir']
     err_rate_list = config['data']['err_rate_list']
