@@ -977,6 +977,195 @@ def get_llm_scores_for_patterns(attr_name, cluster_info_list, logger):
         return {cluster_idx: 0.5 for cluster_idx, _, _, _ in cluster_info_list}
 
 
+
+
+def read_distribution_analysis_results(result_folder, logger):
+    """
+    从之前的运行结果中读取分布分析结果
+    
+    Args:
+        result_folder: 结果文件夹路径
+        logger: 日志记录器
+    
+    Returns:
+        canonical_patterns_dict: {attr: [pattern1, pattern2, ...]}
+        error_patterns_dict: {attr: [pattern1, pattern2, ...]}
+        use_distribution_analysis: {attr: True/False}
+    """
+    import os
+    import json
+    
+    canonical_patterns_dict = {}
+    error_patterns_dict = {}
+    use_distribution_analysis = {}
+    
+    dist_analysis_dir = os.path.join(result_folder, 'distribution_analysis')
+    
+    if not os.path.exists(dist_analysis_dir):
+        logger.warning(f"分布分析目录不存在: {dist_analysis_dir}")
+        return canonical_patterns_dict, error_patterns_dict, use_distribution_analysis
+    
+    # 读取 canonical patterns
+    canonical_file = os.path.join(dist_analysis_dir, 'canonical_patterns.json')
+    if os.path.exists(canonical_file):
+        try:
+            with open(canonical_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                for attr, patterns in data.items():
+                    canonical_patterns_dict[attr] = patterns
+                    use_distribution_analysis[attr] = len(patterns) > 0
+            logger.info(f"✓ 已读取 canonical patterns: {len(canonical_patterns_dict)} 个属性")
+        except Exception as e:
+            logger.warning(f"读取 canonical patterns 失败: {e}")
+    
+    # 读取 error patterns
+    error_file = os.path.join(dist_analysis_dir, 'error_patterns.json')
+    if os.path.exists(error_file):
+        try:
+            with open(error_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                for attr, patterns in data.items():
+                    error_patterns_dict[attr] = patterns
+            total_error_patterns = sum(len(patterns) for patterns in error_patterns_dict.values())
+            logger.info(f"✓ 已读取 error patterns: {total_error_patterns} 个")
+        except Exception as e:
+            logger.warning(f"读取 error patterns 失败: {e}")
+    
+    return canonical_patterns_dict, error_patterns_dict, use_distribution_analysis
+
+
+def read_error_checking_results(result_folder, all_attrs, dirty_csv, logger):
+    """
+    从之前的运行结果中读取LLM标注结果
+    
+    Args:
+        result_folder: 结果文件夹路径
+        all_attrs: 所有属性列表
+        dirty_csv: 脏数据DataFrame
+        logger: 日志记录器
+    
+    Returns:
+        train_data_dict: {attr: {'right': [(idx, value)], 'wrong': [(idx, value)]}}
+        high_confidence_right_dict: {attr: [idx1, idx2, ...]}
+        high_confidence_wrong_dict: {attr: [idx1, idx2, ...]}
+    """
+    import os
+    import re
+    from collections import defaultdict
+    
+    train_data_dict = defaultdict(lambda: {'right': [], 'wrong': []})
+    high_confidence_right_dict = defaultdict(list)
+    high_confidence_wrong_dict = defaultdict(list)
+    
+    error_checking_dir = os.path.join(result_folder, 'error_checking')
+    
+    if not os.path.exists(error_checking_dir):
+        logger.warning(f"错误检测目录不存在: {error_checking_dir}")
+        return train_data_dict, high_confidence_right_dict, high_confidence_wrong_dict
+    
+    total_labeled = 0
+    total_error_pattern_labeled = 0
+    
+    for attr in all_attrs:
+        # 1. 读取 error_checking 文件（LLM标注）
+        error_checking_file = os.path.join(error_checking_dir, f'error_checking_{attr}.txt')
+        
+        if os.path.exists(error_checking_file):
+            try:
+                with open(error_checking_file, 'r', encoding='utf-8') as f:
+                    file_content = f.read()
+                
+                # 解析标注结果
+                # 格式: "has_error_in_xxx_value": true/false
+                pattern = rf'"has_error_in_{attr}_value":\s*(true|false)'
+                matches = re.findall(pattern, file_content, re.IGNORECASE)
+                
+                # 提取索引 - 支持 np.int64(xxx) 格式
+                # 格式: // indices: [np.int64(374), np.int64(335), ...]
+                indices_pattern = r'// indices:\s*\[([^\]]+)\]'
+                indices_matches = re.findall(indices_pattern, file_content)
+                
+                # 解析索引
+                all_indices = []
+                for indices_str in indices_matches:
+                    # 提取所有数字（支持 np.int64(xxx) 格式）
+                    # 使用更精确的模式：匹配括号内的数字
+                    numbers = re.findall(r'\((\d+)\)', indices_str)
+                    if not numbers:
+                        # 如果没有括号，直接提取数字
+                        numbers = re.findall(r'(?<![.\d])\d+(?![.\d])', indices_str)
+                    all_indices.extend([int(num) for num in numbers])
+                
+                # 将标注结果与索引对应
+                for i, has_error_str in enumerate(matches):
+                    if i >= len(all_indices):
+                        break
+                    
+                    idx = all_indices[i]
+                    has_error = has_error_str.lower() == 'true'
+                    
+                    # 获取值
+                    if idx in dirty_csv.index:
+                        value = dirty_csv.loc[idx, attr]
+                        
+                        if has_error:
+                            train_data_dict[attr]['wrong'].append((idx, value))
+                            high_confidence_wrong_dict[attr].append(idx)
+                        else:
+                            train_data_dict[attr]['right'].append((idx, value))
+                            high_confidence_right_dict[attr].append(idx)
+                        
+                        total_labeled += 1
+                
+                logger.info(f"✓ 已读取 {attr} 的LLM标注: {len(train_data_dict[attr]['right'])} 正确, {len(train_data_dict[attr]['wrong'])} 错误")
+            
+            except Exception as e:
+                logger.warning(f"读取 {attr} 的LLM标注失败: {e}")
+        
+        # 2. 读取 error_pattern_pre_labeled 文件（error pattern预标注）
+        error_pattern_file = os.path.join(error_checking_dir, f'error_pattern_pre_labeled_{attr}.txt')
+        
+        if os.path.exists(error_pattern_file):
+            try:
+                with open(error_pattern_file, 'r', encoding='utf-8') as f:
+                    file_content = f.read()
+                
+                # 解析格式: idx=15: label=1, value='...'
+                pattern = r'idx=(\d+):\s*label=(\d+)'
+                matches = re.findall(pattern, file_content)
+                
+                for idx_str, label_str in matches:
+                    idx = int(idx_str)
+                    label = int(label_str)
+                    
+                    # 获取值
+                    if idx in dirty_csv.index:
+                        value = dirty_csv.loc[idx, attr]
+                        
+                        if label == 1:  # 错误
+                            # 避免重复添加
+                            if idx not in high_confidence_wrong_dict[attr]:
+                                train_data_dict[attr]['wrong'].append((idx, value))
+                                high_confidence_wrong_dict[attr].append(idx)
+                                total_error_pattern_labeled += 1
+                        else:  # 正确
+                            # 避免重复添加
+                            if idx not in high_confidence_right_dict[attr]:
+                                train_data_dict[attr]['right'].append((idx, value))
+                                high_confidence_right_dict[attr].append(idx)
+                                total_error_pattern_labeled += 1
+                
+                logger.info(f"✓ 已读取 {attr} 的error pattern预标注: {len([m for m in matches if m[1] == '0'])} 正确, {len([m for m in matches if m[1] == '1'])} 错误")
+            
+            except Exception as e:
+                logger.warning(f"读取 {attr} 的error pattern预标注失败: {e}")
+    
+    logger.info(f"✓ 总共读取了 {total_labeled} 个LLM标注样本")
+    logger.info(f"✓ 总共读取了 {total_error_pattern_labeled} 个error pattern预标注样本")
+    logger.info(f"✓ 合计: {total_labeled + total_error_pattern_labeled} 个标注样本")
+    
+    return train_data_dict, high_confidence_right_dict, high_confidence_wrong_dict
+
 def perform_distribution_analysis(dirty_csv, col_num, col_name, config, logger):
     """
     执行分布分析方法
@@ -1903,8 +2092,6 @@ def llm_label_indices(attr_name, indices, dirty_csv, clean_csv, related_attrs_di
     
     all_responses = []
     
-    all_responses = []
-    
     for sub_list_values, sub_list_indices in zip(split_values, split_indices):
         try:
             vals_str = '\n'.join(sub_list_values)
@@ -2797,8 +2984,44 @@ if __name__ == "__main__":
             distribution_analysis_results = {}
             canonical_patterns_dict = {}
             use_distribution_analysis = {}
+            error_patterns_dict = {}
             
-            if DISTRIBUTION_ANALYSIS_CONFIG.get('enabled', False):
+            # 检查是否从之前的结果中读取
+            READ_CONFIG = config['model'].get('read_from_previous', {})
+            read_enabled = READ_CONFIG.get('enabled', False)
+            read_dist_analysis = READ_CONFIG.get('read_distribution_analysis', False)
+            result_folder = READ_CONFIG.get('result_folder', '')
+            print(read_enabled)
+            print(read_dist_analysis)
+            print(result_folder)
+            if read_enabled and read_dist_analysis and result_folder:
+                logger.info("=" * 60)
+                logger.info("从之前的结果中读取分布分析数据")
+                logger.info(f"读取路径: {result_folder}")
+                logger.info("=" * 60)
+                
+                canonical_patterns_dict, error_patterns_dict, use_distribution_analysis = \
+                    read_distribution_analysis_results(result_folder, logger)
+                
+                # 记录读取结果
+                dist_analysis_attrs = [attr for attr, use in use_distribution_analysis.items() if use]
+                logger.info(f"已读取分布分析的列: {dist_analysis_attrs}")
+                para_file.write(f"Read distribution analysis from: {result_folder}\n")
+                para_file.write(f"Distribution analysis enabled for: {dist_analysis_attrs}\n")
+                
+                # 统计error函数
+                total_error_patterns = sum(len(patterns) for patterns in error_patterns_dict.values())
+                logger.info(f"已读取 {total_error_patterns} 个error函数")
+                para_file.write(f"Total error patterns read: {total_error_patterns}\n")
+                
+                # 补充未读取到的属性
+                for attr in all_attrs:
+                    if attr not in use_distribution_analysis:
+                        use_distribution_analysis[attr] = False
+                    if attr not in error_patterns_dict:
+                        error_patterns_dict[attr] = []
+            
+            elif DISTRIBUTION_ANALYSIS_CONFIG.get('enabled', False):
                 logger.info("分布分析方法已启用")
                 with Timer('Distribution Analysis', logger, time_file) as t:
                     distribution_analysis_results, canonical_patterns_dict, error_patterns_dict, use_distribution_analysis = \
@@ -2848,36 +3071,61 @@ if __name__ == "__main__":
             train_data_dict = defaultdict(lambda: {'right': [], 'wrong': []})
             
             # ==================== 步骤5: 初始LLM多轮标注 ====================
-            # 第一次迭代使用聚类中心indices
-            indices_dict = {attr: list(clusters[0]) for attr, clusters in cluster_index_dict.items()}
+            # 检查是否从之前的结果中读取LLM标注
+            read_error_checking = READ_CONFIG.get('read_error_checking', False)
             
-            logger.info(f"开始初始LLM多轮标注，共 {INITIAL_LLM_LABEL_ITERATIONS} 轮")
-            with Timer('Initial LLM Multi-round Labeling', logger, time_file) as t:
-                for round_idx in range(INITIAL_LLM_LABEL_ITERATIONS):
-                    logger.info(f"初始标注第 {round_idx + 1} 轮")
-                    for attr_name, indices in indices_dict.items():
-                        if len(indices) == 0:
-                            continue
+            if read_enabled and read_error_checking and result_folder:
+                logger.info("=" * 60)
+                logger.info("从之前的结果中读取LLM标注数据")
+                logger.info(f"读取路径: {result_folder}")
+                logger.info("=" * 60)
+                
+                train_data_dict, high_confidence_right_dict, high_confidence_wrong_dict = \
+                    read_error_checking_results(result_folder, all_attrs, dirty_csv, logger)
+                
+                # 统计读取的标注数量
+                total_right = sum(len(data['right']) for data in train_data_dict.values())
+                total_wrong = sum(len(data['wrong']) for data in train_data_dict.values())
+                labeled_number = total_right + total_wrong
+                
+                logger.info(f"已读取标注: {total_right} 正确, {total_wrong} 错误, 共 {labeled_number} 个")
+                para_file.write(f"Read error checking from: {result_folder}\n")
+                para_file.write(f"Total labels read: {labeled_number} (right: {total_right}, wrong: {total_wrong})\n")
+                
+                # 跳过初始LLM标注
+                logger.info("跳过初始LLM标注（已从文件读取）")
+            else:
+                # 第一次迭代使用聚类中心indices
+                indices_dict = {attr: list(clusters[0]) for attr, clusters in cluster_index_dict.items()}
+                
+                logger.info(f"开始初始LLM多轮标注，共 {INITIAL_LLM_LABEL_ITERATIONS} 轮")
+                with Timer('Initial LLM Multi-round Labeling', logger, time_file) as t:
+                    for round_idx in range(INITIAL_LLM_LABEL_ITERATIONS):
+                        logger.info(f"初始标注第 {round_idx + 1} 轮")
+                        for attr_name, indices in indices_dict.items():
+                            if len(indices) == 0:
+                                continue
+                            
+                            # 调用LLM标注（不使用canonical_patterns作为上下文）
+                            # 获取该列的error函数
+                            attr_error_patterns = error_patterns_dict.get(attr_name, [])
+                            result = llm_label_indices(
+                                attr_name, indices, dirty_csv, clean_csv, related_attrs_dict,
+                                high_confidence_right_dict, high_confidence_wrong_dict,
+                                error_checking_res_directory, err_check_val_num_per_query,
+                                canonical_patterns=None,  # 不作为上下文
+                                error_patterns=attr_error_patterns  # 使用error函数预筛选
+                            )
+                            
+                            # 将结果累积到历史标注中
+                            for idx, value, label in result.get(attr_name, []):
+                                index_value_label_history[attr_name][idx].append(label)
                         
-                        # 调用LLM标注（不使用canonical_patterns作为上下文）
-                        # 获取该列的error函数
-                        attr_error_patterns = error_patterns_dict.get(attr_name, [])
-                        result = llm_label_indices(
-                            attr_name, indices, dirty_csv, clean_csv, related_attrs_dict,
-                            high_confidence_right_dict, high_confidence_wrong_dict,
-                            error_checking_res_directory, err_check_val_num_per_query,
-                            canonical_patterns=None,  # 不作为上下文
-                            error_patterns=attr_error_patterns  # 使用error函数预筛选
-                        )
-                        
-                        # 将结果累积到历史标注中
-                        for idx, value, label in result.get(attr_name, []):
-                            index_value_label_history[attr_name][idx].append(label)
-                    
-                    labeled_number += sum(len(indices) for indices in indices_dict.values())
-            total_time += t.duration
-            
-            # 计算并保存每列的总体LLM标注准确率
+                        labeled_number += sum(len(indices) for indices in indices_dict.values())
+                total_time += t.duration
+                
+                
+                # 计算并保存每列的总体LLM标注准确率
             logger.info("计算LLM标注总体准确率...")
             for attr in all_attrs:
                 error_checking_file = os.path.join(error_checking_res_directory, f'error_checking_{attr}.txt')
@@ -2905,26 +3153,42 @@ if __name__ == "__main__":
                                 f.write("="*80 + "\n")
                                 
                                 logger.info(f"列 '{attr}' LLM标注准确率: {overall_accuracy:.4f}")
-            
-            # ==================== 步骤6: 根据一致性构建训练集 ====================
-            logger.info("根据LLM标注一致性构建训练集")
-            with Timer('Building Training Set', logger, time_file) as t:
-                train_data_dict, final_labels = convert_label_history_to_train_data(
-                    index_value_label_history, dirty_csv, related_attrs_dict,
-                    INITIAL_LLM_LABEL_CONSISTENCY_THRESHOLD, all_attrs
-                )
-                
-                # 统计训练数据
-                total_train_samples = 0
-                for attr in all_attrs:
-                    right_count = len(train_data_dict[attr]['right'])
-                    wrong_count = len(train_data_dict[attr]['wrong'])
-                    total_train_samples += right_count + wrong_count
-                    logger.info(f"属性 {attr}: 正确样本 {right_count}, 错误样本 {wrong_count}")
-                
-                logger.info(f"训练集总样本数: {total_train_samples}")
-                para_file.write(f"Training samples: {total_train_samples}\n")
-            total_time += t.duration
+            # 检查是否从文件读取了标注数据
+            if read_enabled and read_error_checking and result_folder:
+                # 从文件读取的情况，train_data_dict 已经填充好了
+                logger.info("使用从文件读取的训练数据")
+                with Timer('Building Training Set', logger, time_file) as t:
+                    # 统计训练数据
+                    total_train_samples = 0
+                    for attr in all_attrs:
+                        right_count = len(train_data_dict[attr]['right'])
+                        wrong_count = len(train_data_dict[attr]['wrong'])
+                        total_train_samples += right_count + wrong_count
+                        logger.info(f"属性 {attr}: 正确样本 {right_count}, 错误样本 {wrong_count}")
+                    
+                    logger.info(f"训练集总样本数: {total_train_samples}")
+                    para_file.write(f"Training samples: {total_train_samples}\n")
+                total_time += t.duration
+            else:
+                # 正常流程：根据LLM标注一致性构建训练集
+                logger.info("根据LLM标注一致性构建训练集")
+                with Timer('Building Training Set', logger, time_file) as t:
+                    train_data_dict, final_labels = convert_label_history_to_train_data(
+                        index_value_label_history, dirty_csv, related_attrs_dict,
+                        INITIAL_LLM_LABEL_CONSISTENCY_THRESHOLD, all_attrs
+                    )
+                    
+                    # 统计训练数据
+                    total_train_samples = 0
+                    for attr in all_attrs:
+                        right_count = len(train_data_dict[attr]['right'])
+                        wrong_count = len(train_data_dict[attr]['wrong'])
+                        total_train_samples += right_count + wrong_count
+                        logger.info(f"属性 {attr}: 正确样本 {right_count}, 错误样本 {wrong_count}")
+                    
+                    logger.info(f"训练集总样本数: {total_train_samples}")
+                    para_file.write(f"Training samples: {total_train_samples}\n")
+                total_time += t.duration
             
             # ==================== 步骤7: 训练MLP模型 ====================
             logger.info("训练MLP模型")

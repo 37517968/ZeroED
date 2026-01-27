@@ -47,6 +47,13 @@ model:
     error_pattern_alpha: 0.2
     error_pattern_beta: 0.2
     error_pattern_gamma: 0.6
+
+  # 从之前的运行结果中读取数据
+  read_from_previous:
+    enabled: false  # 是否启用读取功能
+    result_folder: "./result/results/gpt-4o-mini 01-26 21-22 rayyan01-set1-iterations10"  # 要读取的结果文件夹路径，例如: "./result/results/gpt-4o-mini 01-26 21-22 rayyan01-set1-iterations10"
+    read_distribution_analysis: true  # 是否读取分布分析结果（canonical和error函数）
+    read_error_checking: true  # 是否读取LLM标注结果
 data:
   base_dir: .
   err_rate_list:
@@ -54,5 +61,6 @@ data:
   all_set_num: 1
   datasets:
   - rayyan
+  # - beers
   result_dir: results
   err_check_val_num_per_query: 20
