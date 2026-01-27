@@ -77,6 +77,7 @@ def error_check_prompt(col_values, col_name, expert_labeled_right_dict, expert_l
     prompt += "- Do NOT mark a value as an error solely because it is not present in examples.\n"
     prompt += "- Ignore the case sensitivity issues.\n"
     prompt += "- Do not check for data type errors.\n"
+    prompt += "- Null values are also errors.\n"
     prompt += "- **IMPORTANT for temporal data (dates, times, years, etc.)**: When evaluating date/time values, you MUST consider the context and use your knowledge to judge whether the value is reasonable. For example:\n"
     if col_name in expert_labeled_right_dict or col_name in expert_labeled_wrong_dict:
         prompt += f"Below are reference examples for analyzing the correctness of `{col_name}` values.\n"
@@ -585,15 +586,16 @@ Scoring Principles (IMPORTANT):
 Can these two patterns reasonably appear together in the same dataset column?
 
 2. High Incompatibility (0.8–1.0):
-- Assign ONLY when you are confident that coexistence is unlikely due to a clear FORMAT conflict.
-- This applies only you are confident that the value is not correct. (such as null)
+- Assign ONLY when you are confident it is a clear FORMAT conflict.
+- You are confident that the value is not correct. (such as null)
 - This applies when both patterns express the same type of information but follow incompatible formatting conventions.
 
 Examples:
-- "12.0 oz" vs "12.0 oz."
+- "12.0 oz" vs "12.0 oz." vs "12.0 ounce"
 - "0.5" vs "0.5%"
-- String vs String+unit(some String end up with '.' is probably confilct with String not)
+- String vs [String]
 - When column name is '**_title', abbreviation is probably be false.
+- When column name is '**_abbreviation', the full title is probably be false.
 
 Exception:
 Do NOT assign high scores if the format variation may be valid or domain-dependent
@@ -606,11 +608,14 @@ Assign if:
 - Format differences may be acceptable or unconstrained.
 - You are NOT confident the candidate is wrong.
 Examples:
-- Different beer styles or names
+- Different beer styles or names(e.g.,"American IPA" vs "American Double / Imperial IPA" vs "English India Pale Ale (IPA)")
 - Different ID lengths
 - Different numeric precision
 - There maybe 'X' at the end of journal_issn.
 - There maybe different expressions in "journal_title" are true.
+- "journal_issn" can also be like "Jan-55"
+- "article_pagination" can also express in many types.
+- Only a '.' at the end of a sentence is not actually incorrect.
 
 4. Uncertainty Rule:
 If you are unsure, ALWAYS assign a score in [0.3, 0.5].
