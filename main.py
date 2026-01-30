@@ -332,6 +332,17 @@ def get_llm_canonicality_score(attr_name, sample_values, logger=None):
     
     # 调用LLM评估
     prompt = llm_canonicality_score_prompt(attr_name, samples)
+
+    # 保存prompt
+    global _distribution_analysis_prompts
+    if attr_name not in _distribution_analysis_prompts:
+        _distribution_analysis_prompts[attr_name] = {}
+    if 'canonicality_scores' not in _distribution_analysis_prompts[attr_name]:
+        _distribution_analysis_prompts[attr_name]['canonicality_scores'] = []
+    _distribution_analysis_prompts[attr_name]['canonicality_scores'].append({
+        'samples': str(samples)[:200],  # 限制长度
+        'prompt': prompt
+    })
     
     try:
         response = query_base(prompt)
@@ -654,7 +665,14 @@ def generate_and_validate_function(sample_values, cluster_description, attr_name
     log_info(f"[函数生成] 聚类{cluster_id}: 开始生成函数，样本数={len(samples_to_use)}")
     
     # 使用prompt_gen.py中的函数生成提示词
-    prompt = pattern_function_generation_prompt(attr_name, cluster_description, samples_to_use)
+    # 如果是错误函数且有canonical值，传递给prompt生成函数
+    if is_error_function and canonical_values:
+        canonical_samples_to_use = canonical_values[:5] if len(canonical_values) > 5 else canonical_values
+        log_info(f"[函数生成] 聚类{cluster_id}: 错误函数模式，使用{len(canonical_samples_to_use)}个正确样本作为对比")
+        prompt = pattern_function_generation_prompt(attr_name, cluster_description, samples_to_use, 
+                                                   is_error_function=True, canonical_samples=canonical_samples_to_use)
+    else:
+        prompt = pattern_function_generation_prompt(attr_name, cluster_description, samples_to_use)
     log_info(f"[函数生成] 聚类{cluster_id}: 提示词长度={len(prompt)}")
     
     try:
@@ -757,7 +775,11 @@ def find_common_prefix(strings):
 
 def select_diverse_samples(cluster_values, max_samples=3):
     """
-    从聚类值中选择尽可能不同的样本
+    从聚类值中选择最具代表性且多样化的样本
+    
+    策略：
+    1. 选择与其他样本相似度最高的样本（代表性）
+    2. 同时确保选中的样本之间尽可能不同（多样性）
     
     Args:
         cluster_values: 聚类中的所有值
@@ -777,36 +799,58 @@ def select_diverse_samples(cluster_values, max_samples=3):
         if val_str not in seen:
             unique_values.append(val_str)
             seen.add(val_str)
-            if len(unique_values) >= max_samples:
-                break
     
-    # 如果唯一值少于max_samples，返回所有唯一值
+    # 如果唯一值少于等于max_samples，返回所有唯一值
     if len(unique_values) <= max_samples:
         return unique_values
     
-    # 如果有足够的唯一值，选择最不同的几个
-    # 简单策略：选择长度差异最大的样本
-    selected = [unique_values[0]]  # 先选第一个
+    # 计算每个样本与其他所有样本的平均相似度（代表性分数）
+    def calculate_similarity(s1, s2):
+        """计算两个字符串的相似度（0-1之间）"""
+        if not s1 or not s2:
+            return 0.0
+        
+        # 使用编辑距离的归一化版本
+        max_len = max(len(s1), len(s2))
+        if max_len == 0:
+            return 1.0
+        
+        # 简单的字符匹配相似度
+        matches = sum(1 for a, b in zip(s1, s2) if a == b)
+        len_penalty = abs(len(s1) - len(s2)) / max_len
+        similarity = (matches / max_len) * (1 - len_penalty * 0.5)
+        
+        return similarity
     
+    # 计算每个样本的代表性分数（与其他样本的平均相似度）
+    representativeness = {}
+    for val in unique_values:
+        similarities = [calculate_similarity(val, other) for other in unique_values if other != val]
+        representativeness[val] = sum(similarities) / len(similarities) if similarities else 0.0
+    
+    # 选择策略：贪心算法
+    # 1. 先选择代表性最高的样本
+    selected = [max(representativeness.items(), key=lambda x: x[1])[0]]
+    
+    # 2. 迭代选择：在剩余样本中，选择既有代表性又与已选样本不同的
     for _ in range(max_samples - 1):
-        max_diff = -1
+        best_score = -1
         best_candidate = None
         
         for candidate in unique_values:
             if candidate in selected:
                 continue
             
-            # 计算与已选样本的最小差异
-            min_diff = float('inf')
-            for selected_val in selected:
-                # 使用长度差异和字符差异
-                len_diff = abs(len(candidate) - len(selected_val))
-                char_diff = sum(1 for a, b in zip(candidate, selected_val) if a != b)
-                diff = len_diff + char_diff
-                min_diff = min(min_diff, diff)
+            # 计算与已选样本的最小相似度（多样性）
+            min_similarity = min(calculate_similarity(candidate, sel) for sel in selected)
+            diversity_score = 1 - min_similarity  # 相似度越低，多样性越高
             
-            if min_diff > max_diff:
-                max_diff = min_diff
+            # 综合分数：代表性 + 多样性
+            # 权重：代表性0.4，多样性0.6
+            combined_score = representativeness[candidate] * 0.4 + diversity_score * 0.6
+            
+            if combined_score > best_score:
+                best_score = combined_score
                 best_candidate = candidate
         
         if best_candidate:
@@ -1402,6 +1446,19 @@ def identify_error_patterns(analysis_result, dirty_csv, logger,
                 canonical_pattern_desc,  # 传递canonical函数描述
                 error_candidate_desc      # 传递候选error函数描述
             )
+
+            # 保存prompt
+            global _distribution_analysis_prompts
+            if col_name not in _distribution_analysis_prompts:
+                _distribution_analysis_prompts[col_name] = {}
+            if 'incompatibility_scores' not in _distribution_analysis_prompts[col_name]:
+                _distribution_analysis_prompts[col_name]['incompatibility_scores'] = []
+            _distribution_analysis_prompts[col_name]['incompatibility_scores'].append({
+                'cluster_id': idx,
+                'canonical_samples': str(canonical_samples[:3])[:200],
+                'error_samples': str(error_samples[:3])[:200],
+                'prompt': prompt
+            })
             response = query_base(prompt)
             response = response.strip()
             
@@ -1845,7 +1902,24 @@ def save_distribution_analysis_results(analysis_results, canonical_patterns_dict
         for prompt_type, prompt_content in prompts.items():
             prompt_file = os.path.join(attr_prompts_dir, f'{prompt_type}.txt')
             with open(prompt_file, 'w', encoding='utf-8') as f:
-                f.write(prompt_content)
+                # 处理列表格式的提示词（如 canonicality_scores, incompatibility_scores）
+                if isinstance(prompt_content, list):
+                    for idx, item in enumerate(prompt_content):
+                        f.write(f"\n{'='*80}\n")
+                        f.write(f"Entry {idx + 1}\n")
+                        f.write(f"{'='*80}\n\n")
+                        if isinstance(item, dict):
+                            for key, value in item.items():
+                                if key == 'prompt':
+                                    f.write(f"\n{key}:\n{value}\n")
+                                else:
+                                    f.write(f"{key}: {value}\n")
+                        else:
+                            f.write(str(item))
+                        f.write("\n")
+                else:
+                    # 字符串格式的提示词
+                    f.write(prompt_content)
     
     logger.info(f"Prompts已保存到: {prompts_dir}")
     

@@ -5,7 +5,7 @@ model:
   # 分布分析LLM配置（用于聚类描述、模式识别等）
   distribution_analysis_llm:
     api_use: true
-    model_type: glm-4.7
+    model_type: qwen-plus
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_keys:
       - sk-cf0f901fbe8847099502a50aa2d59ec9
@@ -20,7 +20,7 @@ model:
   pre_func_use: true
   func_use: true
   rel_top: 2
-  label_prop: false
+  label_prop: true
   iterations: 10
   initial_llm_label_iterations: 1
   initial_llm_label_consistency_threshold: 1.0
@@ -62,5 +62,7 @@ data:
   datasets:
   - rayyan
   # - beers
+  # - hospital
+  # - flights
   result_dir: results
   err_check_val_num_per_query: 20
