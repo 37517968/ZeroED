@@ -562,9 +562,8 @@ def error_pattern_incompatibility_prompt(attr_name, canonical_samples, error_can
     prompt = f"""
 You are a data quality expert.
 
-Your task is to assign an INCOMPATIBILITY score (0.0–1.0) between a candidate pattern and the canonical pattern for column "{attr_name}".
+Your task is to assign an INCOMPATIBILITY or ERROR score (0.0–1.0) between a candidate pattern and the canonical pattern for column "{attr_name}".
 
-The score reflects how UNLIKELY these two patterns are to COEXIST in the SAME column.
 
 ---
 
@@ -582,43 +581,40 @@ Examples:
 
 Scoring Principles (IMPORTANT):
 
-1. Core Question:
-Can these two patterns reasonably appear together in the same dataset column?
+1. High Incompatibility (0.8–1.0):
+- Assign ONLY when you are confident it is a clear FORMAT conflict or it is wrong.
+- You should not mark a high score if you are not confident it is wrong, because for descriptive type column, there may be many types of data. 
+- Don't check for spelling error, just only check for pattern error.
+- If column don't have explict pattern feature, don't score it too high. (such as 'journal_title', 'journal_abbreviation', 'article_pagination')
 
-2. High Incompatibility (0.8–1.0):
-- Assign ONLY when you are confident it is a clear FORMAT conflict.
-- You are confident that the value is not correct. (such as null)
-- This applies when both patterns express the same type of information but follow incompatible formatting conventions.
+Exception: 
+- Different id lengths is acceptable because id is increasing. 
+- 'ENG' is acceptable when correct pattetn is like 'eng'. 
+- "journal_issn" can also be like "Jan-55", there may be many types are true. 
 
 Examples:
 - "12.0 oz" vs "12.0 oz." vs "12.0 ounce"
 - "0.5" vs "0.5%"
+- String vs String.
 - String vs [String]
-- When column name is '**_title', abbreviation is probably be false.
-- When column name is '**_abbreviation', the full title is probably be false.
+- When column name is '**_title', abbreviation is probably be false but different types of title are also acceptable.
+- When column name is '**_abbreviation', the full title is probably be false but different types of abbreviation are also acceptable.
 
-Exception:
-Do NOT assign high scores if the format variation may be valid or domain-dependent
-(e.g., an 'X' suffix in journal_issn).
+2. Different types of data may also be valid, which should assign 0.3–0.5:
+- Do NOT assign high scores if the format variation may be valid or domain-dependent(e.g., an 'X' suffix in journal_issn).
+- Different beer styles or names(e.g.,"American IPA" vs "American Double / Imperial IPA" vs "English India Pale Ale (IPA)")
+- Different ID lengths.
+- Different numeric precision
+- There maybe different expressions in "journal_title" are true, such as use parentheses to describe the author and slashes to describe aliases, or all in uppercase.
+- Abbreviation without '.' or use parentheses may also be correct.
+- "journal_issn" can also be like "Jan-55", "Mar-67"
+- "article_pagination" can also express in many types.
 
-3. Medium Incompatibility (0.3–0.5):
+3. Low Incompatibility (0.1–0.2):
 Assign if:
 - Both patterns are plausible values in the same column.
-- They differ semantically but could coexist.
 - Format differences may be acceptable or unconstrained.
-- You are NOT confident the candidate is wrong.
-Examples:
-- Different beer styles or names(e.g.,"American IPA" vs "American Double / Imperial IPA" vs "English India Pale Ale (IPA)")
-- Different ID lengths
-- Different numeric precision
-- There maybe 'X' at the end of journal_issn.
-- There maybe different expressions in "journal_title" are true.
-- "journal_issn" can also be like "Jan-55"
-- "article_pagination" can also express in many types.
-- Only a '.' at the end of a sentence is not actually incorrect.
 
-4. Uncertainty Rule:
-If you are unsure, ALWAYS assign a score in [0.3, 0.5].
 
 ---
 
@@ -662,6 +658,7 @@ Your task:
 3. Provide a concise natural language description for each cluster that captures its key features
 
 The descriptions should:
+- Ignore a small part of spelling error, pay attention to pattern error.
 - Be clear and specific (e.g., "Numeric values with 'oz' unit suffix" rather than "Values with units")
 - Highlight distinguishing features (e.g., "Ends with period" vs "No period")
 - Focus on format/structure rather than semantic meaning
@@ -693,7 +690,8 @@ Only respond with the JSON, no additional text.
     return prompt
 
 
-def pattern_function_generation_prompt(attr_name, cluster_description, sample_values):
+def pattern_function_generation_prompt(attr_name, cluster_description, sample_values, 
+                                       is_error_function=False, canonical_samples=None):
     """
     生成模式匹配函数的提示词
     
@@ -701,13 +699,74 @@ def pattern_function_generation_prompt(attr_name, cluster_description, sample_va
         attr_name: 属性名称
         cluster_description: 聚类的自然语言描述
         sample_values: 样本值列表（最多10个）
+        is_error_function: 是否为错误模式函数（默认False）
+        canonical_samples: 正确模式的样本值列表（仅在is_error_function=True时使用）
     
     Returns:
         prompt: 提示词字符串
     """
     samples_str = '\n'.join([f'- "{s}"' for s in sample_values])
     
-    prompt = f"""You are a data quality expert. Generate a Python function to validate if a value matches the following pattern.
+    if is_error_function and canonical_samples:
+        # 错误模式函数：需要区分错误样本和正确样本
+        canonical_str = '\n'.join([f'- "{s}"' for s in canonical_samples[:5]])
+        
+        prompt = f"""You are a data quality expert. Generate a Python function to identify ERROR values for column '{attr_name}'.
+
+**IMPORTANT**: This is an ERROR PATTERN function. It should:
+1. Return True for ERROR values (the candidate pattern below)
+2. Return False for CORRECT values (the canonical pattern below)
+
+---
+
+ERROR Pattern (should return True):
+Description: {cluster_description}
+Examples:
+{samples_str}
+
+CORRECT Pattern (should return False):
+Examples:
+{canonical_str}
+
+---
+
+Your task:
+Generate a Python function named 'matches_pattern' that:
+1. Takes a single parameter 'value' (string)
+2. Returns True ONLY if the value matches the ERROR pattern
+3. Returns False for CORRECT pattern values
+4. Handles edge cases (empty strings, None, etc.)
+5. Is self-contained (only use standard library like re, datetime, etc.)
+
+**CRITICAL REQUIREMENTS:**
+- The function MUST distinguish between error and correct patterns
+- Analyze the key differences between ERROR and CORRECT patterns
+- Focus on characteristics that make ERROR values wrong (e.g., trailing period, wrong case, missing data)
+- Test mentally: Does it return True for error examples and False for correct examples?
+- Be specific enough to avoid false positives, but general enough to catch similar errors
+- You can relax constraints to match more error values of the same type, but ensure it does NOT match correct values
+
+**STRATEGY:**
+1. First identify what makes the ERROR pattern different from CORRECT pattern
+2. Then write logic that captures those differences
+3. Ensure the function is neither too strict (missing similar errors) nor too loose (matching correct values)
+
+Return ONLY the Python function code, no explanations or markdown.
+
+Example output format:
+def matches_pattern(value):
+    value = value.strip()
+    # Your validation logic here
+    if ***:
+    # Return True for ERROR values
+        return True  
+    # or False based on your logic
+    else:
+        return False
+"""
+    else:
+        # 标准模式函数（Canonical）
+        prompt = f"""You are a data quality expert. Generate a Python function to validate if a value matches the following pattern.
 
 Column: '{attr_name if attr_name else "unknown"}'
 Pattern Description: {cluster_description}
@@ -739,3 +798,4 @@ def matches_pattern(value):
 """
     
     return prompt
+

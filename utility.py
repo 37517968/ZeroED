@@ -127,7 +127,7 @@ def get_read_paths(start_time, end_time, base_dir, result_dir):
     return read_paths
 
 
-def get_ans_from_llm(prompt, api_use=False, model_type='qwen-flash-2025-07-28', llm_config=None, use_distribution_config=False):   # 'gpt-4o-mini'
+def get_ans_from_llm(prompt, api_use=None, model_type=None, llm_config=None, use_distribution_config=False):
     # 如果没有提供llm_config，尝试使用全局配置
     if llm_config is None:
         if use_distribution_config:
@@ -135,15 +135,29 @@ def get_ans_from_llm(prompt, api_use=False, model_type='qwen-flash-2025-07-28', 
         else:
             llm_config = get_annotation_llm_config()
     
-    # 如果提供了llm_config，使用配置中的参数
-    if llm_config:
-        api_use = llm_config.get('api_use', api_use)
-        model_type = llm_config.get('model_type', model_type)
-        api_key_list = llm_config.get('api_keys', ['sk-cf0f901fbe8847099502a50aa2d59ec9'])
-        base_url = llm_config.get('base_url', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
-    else:
-        api_key_list = ['sk-cf0f901fbe8847099502a50aa2d59ec9']
-        base_url = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+    # 必须有配置
+    if llm_config is None:
+        raise ValueError(
+            "LLM配置未设置！请确保在配置文件中正确配置了 distribution_analysis_llm 和 annotation_llm。"
+            f"当前 use_distribution_config={use_distribution_config}"
+        )
+    
+    # 从配置中读取参数（不使用默认值）
+    api_use = llm_config.get('api_use')
+    if api_use is None:
+        raise ValueError(f"配置中缺少 'api_use' 参数。配置内容: {llm_config}")
+    
+    model_type = llm_config.get('model_type')
+    if model_type is None:
+        raise ValueError(f"配置中缺少 'model_type' 参数。配置内容: {llm_config}")
+    
+    api_key_list = llm_config.get('api_keys')
+    if not api_key_list:
+        raise ValueError(f"配置中缺少 'api_keys' 参数或为空。配置内容: {llm_config}")
+    
+    base_url = llm_config.get('base_url')
+    if not base_url:
+        raise ValueError(f"配置中缺少 'base_url' 参数或为空。配置内容: {llm_config}")
     
     if not api_use:
         openai_api_key = "EMPTY"
