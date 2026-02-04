@@ -531,10 +531,11 @@ Only respond with the JSON, no additional text.
     return prompt
 
 
-def error_pattern_incompatibility_prompt(attr_name, canonical_samples, error_candidate_samples, 
-                                        canonical_description=None, candidate_description=None):
+def error_pattern_incompatibility_prompt(attr_name, canonical_samples, error_candidate_samples):
     """
     生成让LLM评估错误候选模式与canonical模式对立程度的prompt
+    
+    修改：不使用聚类描述，只使用样本值进行比较
     
     区分描述性列和格式类列：
     - 描述性列：语义不同但都合理的表述可以共存，不兼容分数较低
@@ -544,37 +545,23 @@ def error_pattern_incompatibility_prompt(attr_name, canonical_samples, error_can
         attr_name: 属性名称
         canonical_samples: canonical模式的示例值列表（最多5个）
         error_candidate_samples: 错误候选模式的样本值列表（最多5个）
-        canonical_description: canonical模式的自然语言描述（可选）
-        candidate_description: 候选错误模式的自然语言描述（可选）
     """
     canonical_samples_str = '\n'.join([f'- "{s}"' for s in canonical_samples])
     candidate_samples_str = '\n'.join([f'- "{s}"' for s in error_candidate_samples])
-    
-    # 添加模式描述
-    canonical_desc_str = ""
-    if canonical_description:
-        canonical_desc_str = f"\nCanonical pattern description: {canonical_description}\n"
-    
-    candidate_desc_str = ""
-    if candidate_description:
-        candidate_desc_str = f"\nCandidate pattern description: {candidate_description}\n"
     
     prompt = f"""
 You are a data quality expert.
 
 Your task is to assign an INCOMPATIBILITY or ERROR score (0.0–1.0) between a candidate pattern and the canonical pattern for column "{attr_name}".
 
+Compare ONLY the sample values below. 
 
 ---
 
-Canonical Pattern:
-{canonical_desc_str}
-Examples:
+Canonical Pattern Examples:
 {canonical_samples_str}
 
-Candidate Pattern:
-{candidate_desc_str}
-Examples:
+Candidate Pattern Examples:
 {candidate_samples_str}
 
 ---
@@ -582,38 +569,18 @@ Examples:
 Scoring Principles (IMPORTANT):
 
 1. High Incompatibility (0.8–1.0):
-- Assign ONLY when you are confident it is a clear FORMAT conflict or it is wrong.
-- You should not mark a high score if you are not confident it is wrong, because for descriptive type column, there may be many types of data. 
+- Assign ONLY when there is a clear, structural/formatting mismatch in the pattern itself.
+- Key indicators: Systematic differences in unit presentation (e.g., “oz” vs. “ounce”), presence/absence of key punctuation (e.g., “oz” vs. “oz.”).
 - Don't check for spelling error, just only check for pattern error.
-- If column don't have explict pattern feature, don't score it too high. (such as 'journal_title', 'journal_abbreviation', 'article_pagination')
 
-Exception: 
-- Different id lengths is acceptable because id is increasing. 
-- 'ENG' is acceptable when correct pattetn is like 'eng'. 
-- "journal_issn" can also be like "Jan-55", there may be many types are true. 
+2. Medium Incompatibility (0.3–0.5):
+- Assign when the values represent different but potentially valid expressions within a descriptive field.
+- Applies to columns like *_title, *_abbreviation, *_name, article_pagination, journal_issn (if containing dates like “Jan-55”), beer_style.
 
-Examples:
-- "12.0 oz" vs "12.0 oz." vs "12.0 ounce"
-- "0.5" vs "0.5%"
-- String vs String.
-- String vs [String]
-- When column name is '**_title', abbreviation is probably be false but different types of title are also acceptable.
-- When column name is '**_abbreviation', the full title is probably be false but different types of abbreviation are also acceptable.
-
-2. Different types of data may also be valid, which should assign 0.3–0.5:
-- Do NOT assign high scores if the format variation may be valid or domain-dependent(e.g., an 'X' suffix in journal_issn).
-- Different beer styles or names(e.g.,"American IPA" vs "American Double / Imperial IPA" vs "English India Pale Ale (IPA)")
-- Different ID lengths.
-- Different numeric precision
-- There maybe different expressions in "journal_title" are true, such as use parentheses to describe the author and slashes to describe aliases, or all in uppercase.
-- Abbreviation without '.' or use parentheses may also be correct.
-- "journal_issn" can also be like "Jan-55", "Mar-67"
-- "article_pagination" can also express in many types.
 
 3. Low Incompatibility (0.1–0.2):
-Assign if:
-- Both patterns are plausible values in the same column.
-- Format differences may be acceptable or unconstrained.
+- Assign when patterns are essentially consistent, with only minor, ignorable variations.
+- Key indicators: Case differences (e.g., “ENG” vs “eng”), insignificant whitespace, or different lengths of sequential IDs.
 
 
 ---

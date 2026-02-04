@@ -62,7 +62,38 @@ def ensure_dir(path):
     return path
 
 
+def execute_func(function_code, val, attr):
+    """执行函数代码"""
+    local_scope = {}
+    exec(function_code, globals(), local_scope)
+    function_name = list(local_scope.keys())[0]
+    function = local_scope[function_name]
+    return function(val, attr)
 
+
+# 全局变量：记录执行出错的函数
+funcs_with_errors = set()
+
+
+def handle_func_exec(func, val, attr):
+    """
+    执行函数并处理异常
+    
+    Args:
+        func: 函数代码字符串
+        val: 输入值
+        attr: 属性名
+    
+    Returns:
+        1 if 函数返回True, 0 if 函数返回False, -1 if 执行出错
+    """
+    try:
+        result = execute_func(func, val, attr)
+    except Exception as err:
+        func_str = f"Error: {err}\n" + f"Value: {val}, Attribute: {attr}\nFunc: {func}\n"
+        funcs_with_errors.add(func_str)
+        return -1
+    return 1 if result else 0
 
 
 def get_single_column_features(dirty_csv, col_num, col_name):
@@ -1274,7 +1305,7 @@ def perform_distribution_analysis(dirty_csv, col_num, col_name, config, logger):
         cluster_info_list.append((cluster_idx, pattern_desc, sample_values_for_scoring, cluster_size))
         logger.info(f"  聚类{cluster_idx} (大小={cluster_size}): {pattern_desc}")
     
-    # 步骤3: 使用LLM比较规范并获取分数
+    # 步骤3: 使用LLM比较规范并获取分数（只使用样本值进行比较）
     llm_scores_dict = {}
     if len(cluster_info_list) > 0:
         logger.info(f"使用LLM比较 {len(cluster_info_list)} 个规范...")
@@ -1408,7 +1439,7 @@ def identify_error_patterns(analysis_result, dirty_csv, logger,
     # 获取分数最高的canonical函数
     best_canonical_idx = top_canonical_indices[0]
     canonical_cluster_values = cluster_values[best_canonical_idx]
-    # 使用LLM生成的聚类描述
+    # 获取canonical函数的描述（用于日志记录，实际比较使用样本值）
     canonical_pattern_desc = cluster_descriptions.get(best_canonical_idx, 
                                                       get_cluster_pattern_description(canonical_cluster_values))
     
@@ -1435,16 +1466,12 @@ def identify_error_patterns(analysis_result, dirty_csv, logger,
         # 使用LLM判断是否为error函数
         error_samples = select_diverse_samples(values, max_samples=10)
         
-        # 获取候选error函数的描述
-        error_candidate_desc = cluster_descriptions.get(idx, get_cluster_pattern_description(values))
-        
+        # 只使用样本值进行比较，不使用聚类描述
         try:
             prompt = error_pattern_incompatibility_prompt(
                 col_name, 
                 canonical_samples, 
-                error_samples,
-                canonical_pattern_desc,  # 传递canonical函数描述
-                error_candidate_desc      # 传递候选error函数描述
+                error_samples
             )
 
             # 保存prompt
@@ -1550,6 +1577,11 @@ def check_value_matches_pattern(value, patterns, example_key='example_values'):
 def check_value_matches_error_pattern(value, error_patterns):
     """检查值是否匹配任何error函数"""
     return check_value_matches_pattern(value, error_patterns, 'example_values')
+
+
+def check_value_matches_canonical_pattern(value, canonical_patterns):
+    """检查值是否匹配任何canonical函数"""
+    return check_value_matches_pattern(value, canonical_patterns, 'example_valid_values')
 
 
     
@@ -2178,7 +2210,8 @@ def llm_label_indices(attr_name, indices, dirty_csv, clean_csv, related_attrs_di
             else:
                 prompt = error_check_prompt(vals_str, attr_name, high_confidence_right_dict, high_confidence_wrong_dict)
             
-            response = query_base(prompt)
+            # 使用标注LLM配置（而非分布分析配置）
+            response = query_base(prompt, use_distribution_config=False)
             response = fix_error_flags(response)
             
             with open(os.path.join(error_checking_res_directory, f'prompt_error_checking_{attr_name}.txt'), 'a', encoding='utf-8') as f:

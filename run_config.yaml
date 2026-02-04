@@ -60,8 +60,8 @@ data:
   - '01'
   all_set_num: 1
   datasets:
-  - rayyan
-  # - beers
+  # - rayyan
+  - beers
   # - hospital
   # - flights
   result_dir: results
