@@ -37,6 +37,7 @@ from utility import (Logger, Timer, copy_file,
                      default_dict_of_lists, get_ans_from_llm, query_base,
                      rag_query, split_list_to_sublists,
                      set_distribution_analysis_llm_config, set_annotation_llm_config)
+from error_pattern_validator import ErrorPatternValidator
 
 # 全局变量：记录分布分析过程中的所有prompts
 _distribution_analysis_prompts = {}
@@ -1528,6 +1529,44 @@ def identify_error_patterns(analysis_result, dirty_csv, logger,
             continue
     
     logger.info(f"列 '{col_name}' 识别出 {len(error_patterns)} 个error函数")
+    
+    # ==================== 验证错误模式 ====================
+    if error_patterns:
+        logger.info(f"开始验证 {len(error_patterns)} 个错误模式...")
+        validator = ErrorPatternValidator()
+        validated_patterns = []
+        
+        for idx, pattern in enumerate(error_patterns):
+            # 提取正确值和错误值示例
+            error_examples = pattern.get('example_values', [])
+            # 使用canonical聚类的值作为正确值示例
+            correct_examples = canonical_cluster_values[:20]  # 最多取20个
+            
+            if not error_examples or not correct_examples:
+                logger.warning(f"  模式 {idx+1}: 无法提取示例，保留模式")
+                validated_patterns.append(pattern)
+                continue
+            
+            # 验证模式
+            validation_result = validator.validate_error_pattern(
+                correct_examples=correct_examples,
+                error_examples=error_examples,
+                min_match_ratio=0.6  # 60%的样本需要符合某个已知模式
+            )
+            
+            if validation_result['valid']:
+                # 模式有效，保留
+                pattern['validation'] = validation_result
+                validated_patterns.append(pattern)
+                logger.info(f"  ✓ 模式 {idx+1} 有效 (置信度: {validation_result['confidence']:.1%})")
+                for matched in validation_result['matched_patterns'][:2]:  # 只显示前2个
+                    logger.info(f"    - {matched['name']} (匹配率: {matched['match_ratio']:.1%})")
+            else:
+                # 模式无效，丢弃
+                logger.info(f"  ✗ 模式 {idx+1} 无效: {validation_result['reason']}")
+        
+        logger.info(f"验证完成: {len(validated_patterns)}/{len(error_patterns)} 个模式有效")
+        error_patterns = validated_patterns
     
     return error_patterns
 

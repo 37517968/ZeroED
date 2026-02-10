@@ -1,5 +1,5 @@
 model:
-  model_type: gpt-4o-mini
+  model_type: qwen-plus
   cluster_rate: 0.1
   api_use: true
   # 分布分析LLM配置（用于聚类描述、模式识别等）
@@ -32,7 +32,7 @@ model:
   result_analyze: true
   distribution_analysis:
     enabled: true
-    eps: 0.5
+    eps: 0.3
     max_cluster_centers: 20
     top_canonical_clusters: 2
     max_samples_per_cluster: 10
@@ -60,9 +60,9 @@ data:
   - '01'
   all_set_num: 1
   datasets:
-  # - rayyan
-  - beers
-  # - hospital
-  # - flights
+  - rayyan
+  # - beers
+  - hospital
+  - flights
   result_dir: results
   err_check_val_num_per_query: 20
