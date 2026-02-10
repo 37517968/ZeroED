@@ -137,14 +137,6 @@ class ErrorPatternValidator:
         correct_s = str(correct).strip()
         return "''" in error_s and "''" not in correct_s
     
-    def _check_contains_extra_spaces(self, correct: str, error: str) -> bool:
-        """通用：脏值包含多余空格（连续两个空格），干净值不包含
-        应用场景：hospital.MeasureName
-        """
-        error_s = str(error).strip()
-        correct_s = str(correct).strip()
-        return '  ' in error_s and '  ' not in correct_s
-    
     def _check_ends_with_state_code(self, correct: str, error: str) -> bool:
         """通用：脏值以州代码结尾，干净值不以州代码结尾
         应用场景：beers.city
@@ -299,8 +291,7 @@ class ErrorPatternValidator:
         应用场景：hospital.Sample
         """
         error_s = str(error).strip().lower()
-        correct_s = str(correct).strip().lower()
-        return error_s == '1 patients' and correct_s != '1 patients'
+        return error_s == '1 patients'
 
 
 if __name__ == '__main__':
