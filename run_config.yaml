@@ -17,23 +17,15 @@ model:
     api_keys:
       - sk-9SSJQSfSLf7aUtfTCMhCgsxiw5deylXvOUuHtPCDDB3Sa1ds
   related_attrs: true
-  pre_func_use: true
-  func_use: true
   rel_top: 2
   label_prop: true
-  iterations: 10
   initial_llm_label_iterations: 1
   initial_llm_label_consistency_threshold: 1.0
-  train_high_confidence_threshold: 0.8
-  mid_confidence_threshold: 0.7
-  high_confidence_threshold: 0.95
-  cluster_selection_window: 5
-  compute_f1_per_iteration: true
   result_analyze: true
   
   # 不确定性采样配置
   uncertainty_sampling:
-    enabled: true  # 是否启用不确定性采样
+    enabled: false  # 是否启用不确定性采样
     sample_ratio: 0.1  # 采样比例（剩余未标注样本的比例）
     min_samples: 10  # 最少采样数
     max_samples: 50  # 最多采样数

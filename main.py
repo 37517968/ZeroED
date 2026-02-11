@@ -3044,18 +3044,10 @@ if __name__ == "__main__":
     CLUSTER_RATE = config['model']['cluster_rate']
     API_USE = config['model']['api_use']
     RELATED_ATTRS = config['model']['related_attrs']
-    PRE_FUNC_USE = config['model']['pre_func_use']
-    FUNC_USE = config['model']['func_use']
     REL_TOP = config['model']['rel_top']
     LABEL_PROP = config['model']['label_prop']
-    ITERATIONS = config['model']['iterations']
     INITIAL_LLM_LABEL_ITERATIONS = config['model']['initial_llm_label_iterations']
     INITIAL_LLM_LABEL_CONSISTENCY_THRESHOLD = config['model']['initial_llm_label_consistency_threshold']
-    TRAIN_HIGH_CONFIDENCE_THRESHOLD = config['model']['train_high_confidence_threshold']
-    MID_CONFIDENCE_THRESHOLD = config['model']['mid_confidence_threshold']
-    HIGH_CONFIDENCE_THRESHOLD = config['model']['high_confidence_threshold']
-    CLUSTER_SELECTION_WINDOW = config['model'].get('cluster_selection_window', -1)
-    COMPUTE_F1_PER_ITERATION = config['model'].get('compute_f1_per_iteration', False)
     RESULT_ANALYZE = config['model'].get('result_analyze', False)
 
     # 不确定性采样配置
@@ -3103,7 +3095,7 @@ if __name__ == "__main__":
         for err_rate in err_rate_list:
             date_time = datetime.now().strftime("%m-%d")
             now_time = datetime.now().strftime("%H-%M")  # 使用 - 替代 : 以兼容 Windows
-            resp_path = f"{base_dir}/result/{result_dir}/{MODEL_TYPE} {date_time} {now_time} {dataset}{err_rate}-set{set_num}-iterations{ITERATIONS}"
+            resp_path = f"{base_dir}/result/{result_dir}/{MODEL_TYPE} {date_time} {now_time} {dataset}{err_rate}-set{set_num}"
             error_checking_res_directory = f'{resp_path}/error_checking'
             os.makedirs(resp_path, exist_ok=True)
             os.makedirs(error_checking_res_directory, exist_ok=True)
@@ -3121,7 +3113,7 @@ if __name__ == "__main__":
             para_file = open(os.path.join(resp_path, '0-para.txt'), 'w', encoding='utf-8')
             para_file.write(f"Config: {args.config}\n")
             para_file.write(f"Dataset: {dataset}, Error Rate: {err_rate}\n")
-            para_file.write(f"Iterations: {ITERATIONS}, Initial LLM Iterations: {INITIAL_LLM_LABEL_ITERATIONS}\n")
+            para_file.write(f"Initial LLM Iterations: {INITIAL_LLM_LABEL_ITERATIONS}\n")
             
             total_time = 0
             time_start = time.time()
