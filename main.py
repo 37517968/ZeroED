@@ -38,6 +38,7 @@ from utility import (Logger, Timer, copy_file,
                      rag_query, split_list_to_sublists,
                      set_distribution_analysis_llm_config, set_annotation_llm_config)
 from error_pattern_validator import ErrorPatternValidator
+from improvements_uncertainty_sampling import UncertaintySamplingEnsemble, stratified_uncertainty_sampling
 
 # 全局变量：记录分布分析过程中的所有prompts
 _distribution_analysis_prompts = {}
@@ -3057,6 +3058,17 @@ if __name__ == "__main__":
     COMPUTE_F1_PER_ITERATION = config['model'].get('compute_f1_per_iteration', False)
     RESULT_ANALYZE = config['model'].get('result_analyze', False)
 
+    # 不确定性采样配置
+    UNCERTAINTY_SAMPLING_CONFIG = config['model'].get('uncertainty_sampling', {
+        'enabled': True,
+        'sample_ratio': 0.1,
+        'min_samples': 10,
+        'max_samples': 50,
+        'temp_model_epochs': 50,
+        'methods': ['least_confidence', 'margin', 'entropy'],
+        'stratified_ratios': [0.6, 0.3, 0.1],
+        'adaptive_weights': True
+    })
     
     # 分布分析配置
     DISTRIBUTION_ANALYSIS_CONFIG = config['model'].get('distribution_analysis', {
@@ -3270,6 +3282,197 @@ if __name__ == "__main__":
                         labeled_number += sum(len(indices) for indices in indices_dict.values())
                 total_time += t.duration
                 
+                # ========== 不确定性采样阶段 ==========
+                if UNCERTAINTY_SAMPLING_CONFIG.get('enabled', True):
+                    logger.info("=" * 60)
+                    logger.info("开始不确定性采样阶段")
+                    logger.info("=" * 60)
+                    
+                    # 从配置读取参数
+                    us_sample_ratio = UNCERTAINTY_SAMPLING_CONFIG.get('sample_ratio', 0.1)
+                    us_min_samples = UNCERTAINTY_SAMPLING_CONFIG.get('min_samples', 10)
+                    us_max_samples = UNCERTAINTY_SAMPLING_CONFIG.get('max_samples', 50)
+                    us_temp_model_epochs = UNCERTAINTY_SAMPLING_CONFIG.get('temp_model_epochs', 50)
+                    us_methods = UNCERTAINTY_SAMPLING_CONFIG.get('methods', ['least_confidence', 'margin', 'entropy'])
+                    us_stratified_ratios = UNCERTAINTY_SAMPLING_CONFIG.get('stratified_ratios', [0.6, 0.3, 0.1])
+                    us_adaptive = UNCERTAINTY_SAMPLING_CONFIG.get('adaptive_weights', True)
+                    
+                    logger.info(f"不确定性采样配置: sample_ratio={us_sample_ratio}, min={us_min_samples}, max={us_max_samples}")
+                    logger.info(f"  方法: {us_methods}, 分层比例: {us_stratified_ratios}, 自适应权重: {us_adaptive}")
+                    
+                    # 初始化不确定性采样器
+                    uncertainty_sampler = UncertaintySamplingEnsemble(
+                        methods=us_methods,
+                        adaptive=us_adaptive
+                    )
+                    
+                    # 记录不确定性采样新增的标注数
+                    uncertainty_labeled_number = 0
+                    
+                    # 对每个属性进行不确定性采样
+                    for attr in all_attrs:
+                        logger.info(f"\n处理属性 {attr} 的不确定性采样")
+                        
+                        # 1. 检查是否有初始标注
+                        if len(train_data_dict[attr]['right']) == 0 and len(train_data_dict[attr]['wrong']) == 0:
+                            logger.warning(f"属性 {attr} 没有初始标注，跳过不确定性采样")
+                            continue
+                        
+                        # 2. 训练临时模型用于不确定性估计
+                        try:
+                            attr_name, feature_list, label_list = process_attr_train_feat_simplified(
+                                attr, dirty_csv, train_data_dict, related_attrs_dict,
+                            canonical_patterns_dict, error_patterns_dict
+                        )
+                        
+                            if len(feature_list) < 10:
+                                logger.warning(f"属性 {attr} 训练样本太少({len(feature_list)})，跳过不确定性采样")
+                                continue
+                            
+                            # 训练临时模型
+                            _, temp_model, _, _, _, _ = train_model(attr, feature_list, label_list, num_epochs=us_temp_model_epochs)
+                            logger.info(f"属性 {attr} 临时模型训练完成")
+                        
+                        except Exception as e:
+                            logger.warning(f"属性 {attr} 训练临时模型失败: {e}")
+                            continue
+                    
+                    # 3. 收集未标注样本并计算特征
+                        unlabeled_indices = []  # [(idx, matches_canonical), ...]
+                        unlabeled_features = []
+                        
+                        # 获取已标注的索引
+                        labeled_indices = set()
+                        for idx, _ in train_data_dict[attr]['right']:
+                            labeled_indices.add(idx)
+                        for idx, _ in train_data_dict[attr]['wrong']:
+                            labeled_indices.add(idx)
+                        
+                        # 加载fasttext模型
+                        import fasttext
+                        fasttext_model = fasttext.load_model('./cc.en.300.bin')
+                        
+                        # 遍历所有样本
+                        for idx in range(len(dirty_csv)):
+                            if idx in labeled_indices:
+                                continue
+                            
+                            cell_val = dirty_csv.iloc[idx, all_attrs.index(attr)]
+                            
+                            # 检查是否符合错误模式（符合则直接标记）
+                            if check_value_matches_error_pattern(cell_val, error_patterns_dict.get(attr, [])):
+                                train_data_dict[attr]['wrong'].append((idx, cell_val))
+                                if attr not in high_confidence_wrong_dict:
+                                    high_confidence_wrong_dict[attr] = []
+                                high_confidence_wrong_dict[attr].append(idx)
+                                continue
+                            
+                            # 检查是否符合正确模式
+                            matches_canonical = check_value_matches_canonical_pattern(
+                                cell_val, canonical_patterns_dict.get(attr, [])
+                            )
+                            
+                            # 计算特征
+                            try:
+                                feature = single_val_feat_simplified(
+                                    cell_val, fasttext_model, attr, all_attrs,
+                                    canonical_patterns_dict.get(attr, []),
+                                    error_patterns_dict.get(attr, [])
+                                )
+                                unlabeled_indices.append((idx, matches_canonical))
+                                unlabeled_features.append(feature)
+                            except Exception as e:
+                                continue
+                        
+                        if len(unlabeled_features) == 0:
+                            logger.info(f"属性 {attr} 所有样本已标注或符合错误模式")
+                            continue
+                        
+                        logger.info(f"属性 {attr} 有 {len(unlabeled_features)} 个未标注样本")
+                        
+                        # 4. 计算不确定性分数
+                        try:
+                            unlabeled_features_array = np.array(unlabeled_features)
+                            probas = temp_model.predict_proba(unlabeled_features_array)
+                            
+                            uncertainty_scores = uncertainty_sampler.compute_uncertainty(
+                                probas, 
+                                features=unlabeled_features_array
+                            )
+                            
+                            logger.info(f"属性 {attr} 不确定性分数计算完成")
+                        
+                        except Exception as e:
+                            logger.warning(f"属性 {attr} 计算不确定性分数失败: {e}")
+                            continue
+                    
+                        # 5. 选择最不确定的样本
+                        n_to_sample = min(us_max_samples, max(us_min_samples, int(len(unlabeled_indices) * us_sample_ratio)))
+                        
+                        try:
+                            selected_local_indices = stratified_uncertainty_sampling(
+                                uncertainty_scores, 
+                                n_to_sample,
+                                ratios=us_stratified_ratios
+                            )
+                            
+                            logger.info(f"属性 {attr} 选择了 {len(selected_local_indices)} 个样本")
+                            
+                        except Exception as e:
+                            logger.warning(f"属性 {attr} 分层采样失败: {e}")
+                            # 降级到简单的top-k采样
+                            selected_local_indices = np.argsort(uncertainty_scores)[-n_to_sample:]
+                        
+                        # 6. 准备LLM标注（正确模式的放最前面）
+                        canonical_matched_indices = []
+                        other_indices = []
+                        
+                        for local_idx in selected_local_indices:
+                            idx, matches_canonical = unlabeled_indices[local_idx]
+                            if matches_canonical:
+                                canonical_matched_indices.append(idx)
+                            else:
+                                other_indices.append(idx)
+                        
+                        final_indices_to_label = canonical_matched_indices + other_indices
+                        
+                        logger.info(f"属性 {attr} 准备标注 {len(final_indices_to_label)} 个样本")
+                        logger.info(f"  其中 {len(canonical_matched_indices)} 个符合正确模式（优先标注）")
+                        
+                        # 7. 调用LLM标注
+                        if len(final_indices_to_label) > 0:
+                            try:
+                                result = llm_label_indices(
+                                    attr, final_indices_to_label, dirty_csv, clean_csv, related_attrs_dict,
+                                    canonical_patterns_dict, error_patterns_dict,
+                                    error_checking_res_directory, err_check_val_num_per_query,
+                                    high_confidence_right_dict, high_confidence_wrong_dict
+                                )
+                                
+                                # 更新标注历史
+                                for idx, value, label in result.get(attr, []):
+                                    index_value_label_history[attr][idx].append(label)
+                                
+                                uncertainty_labeled_number += len(final_indices_to_label)
+                                
+                                logger.info(f"属性 {attr} 不确定性采样标注完成")
+                                
+                            except Exception as e:
+                                logger.warning(f"属性 {attr} LLM标注失败: {e}")
+                                continue
+                    
+                    logger.info("=" * 60)
+                    logger.info(f"不确定性采样阶段完成")
+                    logger.info(f"新增标注: {uncertainty_labeled_number} 个样本")
+                    logger.info(f"总标注数: {labeled_number + uncertainty_labeled_number}")
+                    logger.info("=" * 60)
+                    
+                    # 更新总标注数
+                    labeled_number += uncertainty_labeled_number
+                else:
+                    logger.info("=" * 60)
+                    logger.info("不确定性采样已禁用，跳过此阶段")
+                    logger.info("=" * 60)
                 
                 # 计算并保存每列的总体LLM标注准确率
             logger.info("计算LLM标注总体准确率...")

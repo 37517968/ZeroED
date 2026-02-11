@@ -30,6 +30,24 @@ model:
   cluster_selection_window: 5
   compute_f1_per_iteration: true
   result_analyze: true
+  
+  # 不确定性采样配置
+  uncertainty_sampling:
+    enabled: true  # 是否启用不确定性采样
+    sample_ratio: 0.1  # 采样比例（剩余未标注样本的比例）
+    min_samples: 10  # 最少采样数
+    max_samples: 50  # 最多采样数
+    temp_model_epochs: 50  # 临时模型训练轮数
+    methods:  # 使用的不确定性度量方法
+      - least_confidence
+      - margin
+      - entropy
+    stratified_ratios:  # 分层采样比例 [高不确定性, 中等, 低不确定性]
+      - 0.6
+      - 0.3
+      - 0.1
+    adaptive_weights: true  # 是否使用自适应权重
+  
   distribution_analysis:
     enabled: true
     eps: 0.3
@@ -61,7 +79,7 @@ data:
   all_set_num: 1
   datasets:
   - rayyan
-  # - beers
+  - beers
   - hospital
   - flights
   result_dir: results

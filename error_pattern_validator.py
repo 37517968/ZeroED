@@ -20,7 +20,6 @@ class ErrorPatternValidator:
             'trailing_asterisk': self._check_trailing_asterisk,
             'contains_percentage': self._check_contains_percentage,
             'contains_double_apostrophe': self._check_contains_double_apostrophe,
-            'contains_extra_spaces': self._check_contains_extra_spaces,
             'ends_with_state_code': self._check_ends_with_state_code,
             'is_airport_code': self._check_is_airport_code,
             'has_timezone_info': self._check_has_timezone_info,
