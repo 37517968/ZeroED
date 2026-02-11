@@ -3274,6 +3274,26 @@ if __name__ == "__main__":
                         labeled_number += sum(len(indices) for indices in indices_dict.values())
                 total_time += t.duration
                 
+                # ========== 转换标注历史为训练数据（用于不确定性采样） ==========
+                logger.info("=" * 60)
+                logger.info("将初始标注历史转换为训练数据（用于不确定性采样）")
+                logger.info("=" * 60)
+                train_data_dict, _ = convert_label_history_to_train_data(
+                    index_value_label_history, dirty_csv, related_attrs_dict,
+                    INITIAL_LLM_LABEL_CONSISTENCY_THRESHOLD, all_attrs
+                )
+                
+                # 统计初始训练数据
+                initial_train_samples = 0
+                for attr in all_attrs:
+                    right_count = len(train_data_dict[attr]['right'])
+                    wrong_count = len(train_data_dict[attr]['wrong'])
+                    initial_train_samples += right_count + wrong_count
+                    logger.info(f"  属性 {attr}: 正确 {right_count}, 错误 {wrong_count}")
+                
+                logger.info(f"初始训练样本总数: {initial_train_samples}")
+                logger.info("=" * 60)
+                
                 # ========== 不确定性采样阶段 ==========
                 if UNCERTAINTY_SAMPLING_CONFIG.get('enabled', True):
                     logger.info("=" * 60)
@@ -3461,10 +3481,36 @@ if __name__ == "__main__":
                     
                     # 更新总标注数
                     labeled_number += uncertainty_labeled_number
+                    
+                    # 重新转换标注历史为训练数据（包含不确定性采样的新标注）
+                    logger.info("=" * 60)
+                    logger.info("重新转换标注历史为训练数据（包含不确定性采样标注）")
+                    logger.info("=" * 60)
+                    train_data_dict, final_labels = convert_label_history_to_train_data(
+                        index_value_label_history, dirty_csv, related_attrs_dict,
+                        INITIAL_LLM_LABEL_CONSISTENCY_THRESHOLD, all_attrs
+                    )
+                    
+                    # 统计最终训练数据
+                    final_train_samples = 0
+                    for attr in all_attrs:
+                        right_count = len(train_data_dict[attr]['right'])
+                        wrong_count = len(train_data_dict[attr]['wrong'])
+                        final_train_samples += right_count + wrong_count
+                        logger.info(f"  属性 {attr}: 正确 {right_count}, 错误 {wrong_count}")
+                    
+                    logger.info(f"最终训练样本总数: {final_train_samples} (增加了 {final_train_samples - initial_train_samples} 个)")
+                    logger.info("=" * 60)
                 else:
                     logger.info("=" * 60)
                     logger.info("不确定性采样已禁用，跳过此阶段")
                     logger.info("=" * 60)
+                    
+                    # 不确定性采样禁用时，使用初始训练数据
+                    _, final_labels = convert_label_history_to_train_data(
+                        index_value_label_history, dirty_csv, related_attrs_dict,
+                        INITIAL_LLM_LABEL_CONSISTENCY_THRESHOLD, all_attrs
+                    )
                 
                 # 计算并保存每列的总体LLM标注准确率
             logger.info("计算LLM标注总体准确率...")
@@ -3497,37 +3543,33 @@ if __name__ == "__main__":
             # 检查是否从文件读取了标注数据
             if read_enabled and read_error_checking and result_folder:
                 # 从文件读取的情况，train_data_dict 已经填充好了
+                logger.info("=" * 60)
                 logger.info("使用从文件读取的训练数据")
+                logger.info("=" * 60)
+                
+                # 统计训练数据
                 with Timer('Building Training Set', logger, time_file) as t:
-                    # 统计训练数据
                     total_train_samples = 0
                     for attr in all_attrs:
                         right_count = len(train_data_dict[attr]['right'])
                         wrong_count = len(train_data_dict[attr]['wrong'])
                         total_train_samples += right_count + wrong_count
-                        logger.info(f"属性 {attr}: 正确样本 {right_count}, 错误样本 {wrong_count}")
+                        logger.info(f"  属性 {attr}: 正确 {right_count}, 错误 {wrong_count}")
                     
                     logger.info(f"训练集总样本数: {total_train_samples}")
                     para_file.write(f"Training samples: {total_train_samples}\n")
                 total_time += t.duration
             else:
-                # 正常流程：根据LLM标注一致性构建训练集
-                logger.info("根据LLM标注一致性构建训练集")
+                # 正常流程：train_data_dict 已经在不确定性采样阶段构建好了
+                logger.info("=" * 60)
+                logger.info("训练数据已准备完成")
+                logger.info("=" * 60)
+                
                 with Timer('Building Training Set', logger, time_file) as t:
-                    train_data_dict, final_labels = convert_label_history_to_train_data(
-                        index_value_label_history, dirty_csv, related_attrs_dict,
-                        INITIAL_LLM_LABEL_CONSISTENCY_THRESHOLD, all_attrs
+                    total_train_samples = sum(
+                        len(train_data_dict[attr]['right']) + len(train_data_dict[attr]['wrong'])
+                        for attr in all_attrs
                     )
-                    
-                    # 统计训练数据
-                    total_train_samples = 0
-                    for attr in all_attrs:
-                        right_count = len(train_data_dict[attr]['right'])
-                        wrong_count = len(train_data_dict[attr]['wrong'])
-                        total_train_samples += right_count + wrong_count
-                        logger.info(f"属性 {attr}: 正确样本 {right_count}, 错误样本 {wrong_count}")
-                    
-                    logger.info(f"训练集总样本数: {total_train_samples}")
                     para_file.write(f"Training samples: {total_train_samples}\n")
                 total_time += t.duration
             
