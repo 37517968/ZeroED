@@ -2098,6 +2098,12 @@ def convert_label_history_to_train_data(index_value_label_history, dirty_csv, re
     train_data_dict = defaultdict(lambda: {'right': [], 'wrong': []})
     final_labels = defaultdict(list)
     
+    # 初始化统计变量
+    passed = 0
+    failed = 0
+    right_final = 0
+    wrong_final = 0
+    
     for attr in all_attrs:
         if attr not in index_value_label_history:
             continue
@@ -2116,10 +2122,18 @@ def convert_label_history_to_train_data(index_value_label_history, dirty_csv, re
             
             # 只有一致性达到阈值的样本才加入训练集
             if consistency >= consistency_threshold:
+                passed += 1
                 if majority_label == 1:
                     train_data_dict[attr]['wrong'].append((idx, value))
+                    wrong_final += 1
                 else:
                     train_data_dict[attr]['right'].append((idx, value))
+                    right_final += 1
+            else:
+                failed += 1
+                # 打印第一个未通过的样本
+                if failed == 1:
+                    logger.warning(f"[DEBUG-3] {attr}: 样本idx={idx}未通过, consistency={consistency:.2f}, labels={label_list}")
     
     return train_data_dict, final_labels
 
@@ -2395,9 +2409,28 @@ def extract_labels_from_responses(attr_name, responses_with_indices, dirty_csv, 
             error_analysis = m.group(2).lower()
             has_error = m.group(3).lower() == 'true'
             
+            # 先去掉外层引号（如果有）
+            if value_row.startswith('"') and value_row.endswith('"'):
+                value_row = value_row[1:-1]
+            
             text = normalize_string(
                 value_row.replace("':'", "': '").replace(',', ', ').replace(',  ', ', ').replace('"', "'")
-            ).replace('"{', '{', 1)[:-1] if value_row.startswith('"{') else normalize_string(value_row)
+            )
+            
+            # 尝试将text解析为字典并排序键，以确保与实际数据的匹配
+            try:
+                import ast
+                parsed_dict = ast.literal_eval(text)
+                if isinstance(parsed_dict, dict):
+                    sorted_dict = {k: parsed_dict[k] for k in sorted(parsed_dict.keys())}
+                    text = normalize_string(str(sorted_dict))
+                    logger.warning(f"[DEBUG-PARSE] 成功解析并排序: {text[:100]}")
+                else:
+                    logger.warning(f"[DEBUG-PARSE] 解析结果不是字典: type={type(parsed_dict)}")
+            except Exception as e:
+                # 如果解析失败，保持原样
+                logger.warning(f"[DEBUG-PARSE] 解析失败: {str(e)[:100]}, text={text[:100]}")
+                pass
             
             # 检查是否需要过滤：如果error_analysis包含过滤关键词且标记为错误，则改为正确
             if has_error and any(keyword in error_analysis for keyword in filter_keywords):
@@ -2416,8 +2449,19 @@ def extract_labels_from_responses(attr_name, responses_with_indices, dirty_csv, 
         
         for idx in indices:
             value = dirty_csv.loc[idx, [attr_name] + related_attrs].to_dict()
-            norm_value = normalize_string(str(value))
+            # 使用排序后的字典键来确保一致性
+            sorted_value = {k: value[k] for k in sorted(value.keys())}
+            norm_value = normalize_string(str(sorted_value))
             status = value_status.get(norm_value, 0)
+            
+            # 添加调试：如果找不到匹配，记录日志
+            if norm_value not in value_status:
+                logger.warning(f"[DEBUG-MATCH] {attr_name} idx={idx}: 无法匹配! norm_value={norm_value[:100]}")
+                logger.warning(f"[DEBUG-MATCH]   value_status有{len(value_status)}个键")
+                if len(value_status) > 0:
+                    first_key = list(value_status.keys())[0]
+                    logger.warning(f"[DEBUG-MATCH]   第一个键示例: {first_key[:100]}")
+            
             index_value_label_dict[attr_name].append((idx, value, status))
     
     return index_value_label_dict
@@ -3268,11 +3312,17 @@ if __name__ == "__main__":
                             )
                             
                             # 将结果累积到历史标注中
-                            for idx, value, label in result.get(attr_name, []):
+                            result_items = result.get(attr_name, [])
+                            logger.info(f"[DEBUG-1] {attr_name}: 返回{len(result_items)}个, 错误{sum(1 for _,_,l in result_items if l==1)}")
+                            for idx, value, label in result_items:
                                 index_value_label_history[attr_name][idx].append(label)
                         
                         labeled_number += sum(len(indices) for indices in indices_dict.values())
                 total_time += t.duration
+                logger.info("[DEBUG-2] 标注历史:")
+                for attr in all_attrs:
+                    wrong = sum(1 for idx,labels in index_value_label_history[attr].items() if labels and labels[-1]==1)
+                    logger.info(f"  {attr}: {len(index_value_label_history[attr])}样本, {wrong}错误")
                 
                 # ========== 转换标注历史为训练数据（用于不确定性采样） ==========
                 logger.info("=" * 60)
@@ -3284,12 +3334,17 @@ if __name__ == "__main__":
                 )
                 
                 # 统计初始训练数据
+                logger.info("="*60)
+                logger.info("最终训练集统计")
                 initial_train_samples = 0
                 for attr in all_attrs:
                     right_count = len(train_data_dict[attr]['right'])
                     wrong_count = len(train_data_dict[attr]['wrong'])
                     initial_train_samples += right_count + wrong_count
-                    logger.info(f"  属性 {attr}: 正确 {right_count}, 错误 {wrong_count}")
+                    if wrong_count + right_count == 0:
+                        logger.warning(f"{attr}: 训练集为空!")
+                    else:
+                        logger.info(f"{attr}: {wrong_count}错误 + {right_count}正确")
                 
                 logger.info(f"初始训练样本总数: {initial_train_samples}")
                 logger.info("=" * 60)
