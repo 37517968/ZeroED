@@ -3660,8 +3660,26 @@ if __name__ == "__main__":
             # ==================== 步骤8: 最终预测 ====================
             logger.info("使用模型进行错误检测")
             det_wrong_list_res = []
+            
+            # 导入乱码检测器
+            from garbled_char_detector import GarbledCharDetector
+            garbled_detector = GarbledCharDetector()
+            
             with Timer('Final Prediction', logger, time_file) as t:
                 for col, attr in tqdm(enumerate(all_attrs), desc="Making predictions", ncols=120):
+                    # 步骤8.1: 规则检测 - 乱码字符检测（优先级最高）
+                    garbled_cells = []
+                    for idx in range(len(dirty_csv)):
+                        cell_value = dirty_csv.loc[idx, attr]
+                        if garbled_detector.contains_garbled_chars(cell_value):
+                            garbled_cells.append((idx, attr))
+                            if (idx, attr) not in det_wrong_list_res:
+                                det_wrong_list_res.append((idx, attr))
+                    
+                    if garbled_cells:
+                        logger.info(f"列 '{attr}': 通过乱码检测发现 {len(garbled_cells)} 个错误")
+                    
+                    # 步骤8.2: 模型预测（对未被规则检测到的数据）
                     # 获取该列的canonical函数和error函数（如果有）
                     attr_canonical_patterns = canonical_patterns_dict.get(attr, None)
                     attr_error_patterns = error_patterns_dict.get(attr, [])

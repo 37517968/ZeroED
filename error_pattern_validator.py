@@ -24,6 +24,9 @@ class ErrorPatternValidator:
             'is_airport_code': self._check_is_airport_code,
             'has_timezone_info': self._check_has_timezone_info,
             'has_airline_prefix': self._check_has_airline_prefix,
+            'bracket_wrapped': self._check_bracket_wrapped,
+            'contains_double_space': self._check_contains_double_space,
+            'paren_wrapped': self._check_paren_wrapped,
             
             # ========== 特定模式（无法合并的） ==========
             'unicode_suffix': self._check_unicode_suffix,
@@ -189,6 +192,44 @@ class ErrorPatternValidator:
         has_prefix_correct = bool(re.match(r'^[A-Z]{2}\d+', correct_s))
         return has_prefix_error and not has_prefix_correct
     
+    def _check_bracket_wrapped(self, correct: str, error: str) -> bool:
+        """通用：脏值被方括号[]包裹，干净值没有
+        应用场景：rayyan.article_title
+        示例：
+          Clean: "Neurological dysfunction induced by bilirrubin"
+          Dirty: "[Neurological dysfunction induced by bilirrubin]"
+        """
+        error_s = str(error).strip()
+        correct_s = str(correct).strip()
+        return (error_s.startswith('[') and error_s.endswith(']') and 
+                not correct_s.startswith('['))
+    
+    def _check_contains_double_space(self, correct: str, error: str) -> bool:
+        """通用：脏值包含双空格或多余空格，干净值没有
+        应用场景：rayyan.article_title, rayyan.article_language, rayyan.article_pagination
+        示例：
+          Clean: "eng;por"
+          Dirty: "eng     por"
+        """
+        error_s = str(error).strip()
+        correct_s = str(correct).strip()
+        # 检查是否有多个连续空格
+        has_double_space_error = '  ' in error_s
+        has_double_space_correct = '  ' in correct_s
+        return has_double_space_error and not has_double_space_correct
+    
+    def _check_paren_wrapped(self, correct: str, error: str) -> bool:
+        """通用：脏值被圆括号()包裹，干净值没有
+        应用场景：可能出现在各种数据集
+        示例：
+          Clean: "Some text"
+          Dirty: "(Some text)"
+        """
+        error_s = str(error).strip()
+        correct_s = str(correct).strip()
+        return (error_s.startswith('(') and error_s.endswith(')') and 
+                not correct_s.startswith('('))
+    
     # ==================== 特定验证函数（无法合并） ====================
     
     def _check_unicode_suffix(self, correct: str, error: str) -> bool:
@@ -324,6 +365,30 @@ if __name__ == '__main__':
         ["Jun''ichi", "Ken''ichi"]
     )
     print(f"  有效: {result['valid']}, 置信度: {result['confidence']:.1%}")
+    
+    # 测试4: Rayyan - 方括号包裹
+    print("\n测试4: Rayyan article_title 方括号包裹")
+    result = validator.validate_error_pattern(
+        ['Neurological dysfunction induced by bilirrubin',
+         'Pelvic floor training for women with urinary incontinence',
+         'Laparoscopic appendectomy after the learning curve'],
+        ['[Neurological dysfunction induced by bilirrubin]',
+         '[Pelvic floor training for women with urinary incontinence]',
+         '[Laparoscopic appendectomy after the learning curve]']
+    )
+    print(f"  有效: {result['valid']}, 置信度: {result['confidence']:.1%}")
+    if result['valid']:
+        print(f"  匹配模式: {[p['name'] for p in result['matched_patterns']]}")
+    
+    # 测试6: Rayyan - 双空格
+    print("\n测试6: Rayyan article_language 双空格")
+    result = validator.validate_error_pattern(
+        ['eng;por', 'eng;cn'],
+        ['eng     por', 'Chinese     Chinese, English']
+    )
+    print(f"  有效: {result['valid']}, 置信度: {result['confidence']:.1%}")
+    if result['valid']:
+        print(f"  匹配模式: {[p['name'] for p in result['matched_patterns']]}")
     
     print("\n测试完成！")
 

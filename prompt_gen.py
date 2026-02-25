@@ -571,6 +571,7 @@ Scoring Principles (IMPORTANT):
 1. High Incompatibility (0.8–1.0):
 - Assign ONLY when there is a clear, structural/formatting mismatch in the pattern itself.
 - Key indicators: Systematic differences in unit presentation (e.g., “oz” vs. “ounce”), presence/absence of key punctuation (e.g., “oz” vs. “oz.”).
+- Identify punctuation errors where the text is enclosed in brackets [like this] or end up with a dot while the correct pattern not.
 - Don't check for spelling error, just only check for pattern error.
 
 2. Medium Incompatibility (0.3–0.5):
