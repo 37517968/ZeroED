@@ -109,7 +109,7 @@ class ErrorPatternValidator:
         """通用：脏值末尾有点，干净值没有
         应用场景：beers.ounces (12.0 oz. vs 12.0 oz)
         """
-        return str(error).strip().endswith('.') and not str(correct).strip().endswith('.')
+        return str(error).strip().endswith('oz.') and not str(correct).strip().endswith('.')
     
     def _check_trailing_ellipsis(self, correct: str, error: str) -> bool:
         """通用：脏值以...结尾，干净值不以此结尾
@@ -201,7 +201,7 @@ class ErrorPatternValidator:
         """
         error_s = str(error).strip()
         correct_s = str(correct).strip()
-        return (error_s.startswith('[') and error_s.endswith(']') and 
+        return (error_s.startswith('[') and (error_s.endswith(']') or error_s.endswith('].')) and 
                 not correct_s.startswith('['))
     
     def _check_contains_double_space(self, correct: str, error: str) -> bool:

@@ -1,34 +1,34 @@
 model:
-  model_type: qwen-plus
+  model_type: qwen3.5-plus
   cluster_rate: 0.1
   api_use: true
   # 分布分析LLM配置（用于聚类描述、模式识别等）
   distribution_analysis_llm:
     api_use: true
-    model_type: qwen-plus
+    model_type: qwen3.5-plus
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_keys:
       - sk-cf0f901fbe8847099502a50aa2d59ec9
   # 标注LLM配置（用于错误检测标注）
   annotation_llm:
     api_use: true
-    model_type: gpt-4o-mini
-    base_url: https://jeniya.cn/v1
+    model_type: qwen3.5-plus # gpt-4o-mini
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1 # https://jeniya.cn/v1
     api_keys:
-      - sk-9SSJQSfSLf7aUtfTCMhCgsxiw5deylXvOUuHtPCDDB3Sa1ds
+      - sk-cf0f901fbe8847099502a50aa2d59ec9 # sk-9SSJQSfSLf7aUtfTCMhCgsxiw5deylXvOUuHtPCDDB3Sa1ds
   related_attrs: true
   rel_top: 2
   label_prop: true
   initial_llm_label_iterations: 1
-  initial_llm_label_consistency_threshold: 1.0
+  initial_llm_label_consistency_threshold: 0.9
   result_analyze: true
   
   # 不确定性采样配置
   uncertainty_sampling:
-    enabled: false  # 是否启用不确定性采样
-    sample_ratio: 0.1  # 采样比例（剩余未标注样本的比例）
-    min_samples: 10  # 最少采样数
-    max_samples: 50  # 最多采样数
+    enabled: true  # 是否启用不确定性采样
+    sample_ratio: 0.3  # 采样比例（剩余未标注样本的比例）
+    min_samples: 50 # 10  # 最少采样数
+    max_samples: 200 # 50  # 最多采样数
     temp_model_epochs: 50  # 临时模型训练轮数
     methods:  # 使用的不确定性度量方法
       - least_confidence
@@ -61,7 +61,7 @@ model:
   # 从之前的运行结果中读取数据
   read_from_previous:
     enabled: false  # 是否启用读取功能
-    result_folder: "./result/results/gpt-4o-mini 01-26 21-22 rayyan01-set1-iterations10"  # 要读取的结果文件夹路径，例如: "./result/results/gpt-4o-mini 01-26 21-22 rayyan01-set1-iterations10"
+    result_folder: "./result/results/qwen3.5-plus 02-24 22-36 rayyan01-set1"  # 要读取的结果文件夹路径，例如: "./result/results/gpt-4o-mini 01-26 21-22 rayyan01-set1-iterations10"
     read_distribution_analysis: true  # 是否读取分布分析结果（canonical和error函数）
     read_error_checking: true  # 是否读取LLM标注结果
 data:
@@ -71,8 +71,8 @@ data:
   all_set_num: 1
   datasets:
   - rayyan
-  - beers
-  - hospital
-  - flights
+  # - beers
+  # - hospital
+  # - flights
   result_dir: results
   err_check_val_num_per_query: 20
